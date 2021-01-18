@@ -1,0 +1,12 @@
+/var/log/conntrack_migrator/*.out
+{
+    rotate 2
+    size 100k
+    copytruncate
+    compress
+    delaycompress
+    missingok
+    nomail
+    noshred
+    sharedscripts
+}

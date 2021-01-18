@@ -1,0 +1,5 @@
+[CONNTRACK]
+max_entries_to_migrate = 10000
+
+[LOG]
+level = INFO
