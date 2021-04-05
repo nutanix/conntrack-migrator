@@ -21,7 +21,7 @@ INCLUDE_DIRS := include/ \
 								/usr/include/gio-unix-2.0/
 
 INCLUDE_FLAGS := $(addprefix -I, $(INCLUDE_DIRS))
-CFLAGS := $(INCLUDE_FLAGS) -O2 -Wall -Wextra -Wno-unused-parameter -Wunused -fstack-protector -Wl,-z,relro -Wformat -Wformat-security -Werror=format-security
+CFLAGS := $(INCLUDE_FLAGS) -O2 -ggdb -Wall -Wextra -Wno-unused-parameter -Wunused -fstack-protector -Wl,-z,relro -Wformat -Wformat-security -Werror=format-security
 
 SRC_DIR := src
 GEN_DIR := gen
