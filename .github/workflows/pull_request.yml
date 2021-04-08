@@ -16,8 +16,8 @@ jobs:
         run: |
           yum -y install make gcc-4.8.5 epel-release
           yum -y install glib2-devel libmnl-devel libnetfilter_conntrack-devel check-devel dbus
-    - name: Build
-      run: make all
-    - name: Unit tests
-      run: make check
+      - name: Build
+        run: make all
+      - name: Unit tests
+        run: make check
 
