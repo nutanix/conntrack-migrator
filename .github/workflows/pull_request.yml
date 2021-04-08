@@ -7,13 +7,13 @@ jobs:
   build:
 
     timeout-minutes: 10
-    runs-on: ubuntu-latest
+    runs-on: fedora-latest
 
     steps:
       - uses: actions/checkout@v2
       - name: Install dependencies
         run: |
-          sudo apt-get -y install gcc libglib2.0-dev libmnl-dev libnetfilter-conntrack-dev check dbus
+          sudo yum -y install gcc glib2-devel libmnl-devel libnetfilter_conntrack-devel check dbus
       - name: Build
         run: |
           make all
