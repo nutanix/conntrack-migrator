@@ -13,7 +13,6 @@ jobs:
       - uses: actions/checkout@v2
       - name: Install dependencies
         run: |
-          sudo apt-get -y install make gcc-4.8.5
           sudo apt-get -y install glib2-dev libmnl-dev libnetfilter_conntrack-dev check-dev dbus
       - name: Build
         run: |
