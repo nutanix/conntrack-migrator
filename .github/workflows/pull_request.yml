@@ -17,7 +17,9 @@ jobs:
           yum -y install make gcc-4.8.5 epel-release
           yum -y install glib2-devel libmnl-devel libnetfilter_conntrack-devel check-devel dbus
       - name: Build
-        run: make all
+        run: |
+          make all
+          setcap cap_net_admin+eip build/conntrack_migrator
       - name: Unit tests
-        run: sudo make check # since some tests requires to connect to netlink, using sudo
+        run: make check
 
