@@ -13,7 +13,7 @@ jobs:
       - uses: actions/checkout@v2
       - name: Install dependencies
         run: |
-          sudo apt-get -y install glib2-dev libmnl-dev libnetfilter_conntrack-dev check-dev dbus
+          sudo apt-get -y install gcc libglib2.0-dev libmnl-dev libnetfilter-conntrack-dev check dbus
       - name: Build
         run: |
           make all
