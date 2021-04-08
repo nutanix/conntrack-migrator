@@ -19,5 +19,5 @@ jobs:
       - name: Build
         run: make all
       - name: Unit tests
-        run: make check
+        run: sudo make check # since some tests requires to connect to netlink, using sudo
 
