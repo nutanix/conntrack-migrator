@@ -1,0 +1,23 @@
+name: Build conntrack-migrator
+
+on:
+  pull_request
+
+jobs:
+  build:
+
+    timeout-minutes: 10
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v2
+      - name: Install dependencies
+        run: |
+          sudo apt install -y gcc libglib2.0-dev libmnl-dev libnetfilter-conntrack-dev check dbus
+      - name: Build
+        run: |
+          make all
+      - name: Unit tests
+        run: sudo make check # Since some of the tests require cap_net_admin
+                             # hence running the tests as sudo.
+
