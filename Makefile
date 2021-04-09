@@ -18,9 +18,9 @@ INCLUDE_DIRS := include/ \
 								/usr/include/glib-2.0 \
 								/usr/lib64/glib-2.0/include \
 								/usr/include/gio-unix-2.0/
-
 GLIB_INCLUDE := $(shell pkg-config --cflags gio-2.0 glib-2.0 gobject-2.0 gio-unix-2.0)
 INCLUDE_FLAGS := $(addprefix -I, $(INCLUDE_DIRS)) $(GLIB_INCLUDE)
+
 CFLAGS := $(INCLUDE_FLAGS) -O2 -ggdb -Wall -Wextra -Wno-unused-parameter -Wunused -fstack-protector -Wl,-z,relro -Wformat -Wformat-security -Werror=format-security
 
 SRC_DIR := src
@@ -127,7 +127,8 @@ setup_test_dbus:
 	dbus-daemon --config-file ./tests/dbus-test.conf --print-address 1 --print-pid 1
 
 check: clean_secondary setup_test_dbus $(TEST_RUNNERS)
-	pkill -9 -f "dbus-daemon --config-file ./tests/dbus-test.conf"
+	kill -9 `cat /tmp/dbus/messagebus.pid` || true
+	rm -rf /tmp/dbus
 
 clean_secondary:
 	rm -rf $(TEST_BUILD_DIR)

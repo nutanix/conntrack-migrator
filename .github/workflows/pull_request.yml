@@ -7,7 +7,7 @@ jobs:
   build:
 
     timeout-minutes: 10
-    runs-on: fedora-latest
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v2
@@ -18,5 +18,6 @@ jobs:
         run: |
           make all
       - name: Unit tests
-        run: sudo make check
+        run: sudo make check # Since some of the tests require cap_net_admin
+                             # hence running the tests as sudo.
 
