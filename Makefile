@@ -7,20 +7,20 @@
 # the GNU General Public License version 2.
 
 CC := gcc
+GLIB_LIBS := $(shell pkg-config --libs gio-2.0 glib-2.0 gobject-2.0 gio-unix-2.0)
 LDLIBS := -lmnl \
 					-lnetfilter_conntrack \
 					-lpthread \
-					-lglib-2.0 \
-					-lgio-2.0 \
-					-lgobject-2.0
+					$(GLIB_LIBS)
 
 INCLUDE_DIRS := include/ \
 								gen/ \
 								/usr/include/glib-2.0 \
 								/usr/lib64/glib-2.0/include \
 								/usr/include/gio-unix-2.0/
+GLIB_INCLUDE := $(shell pkg-config --cflags gio-2.0 glib-2.0 gobject-2.0 gio-unix-2.0)
+INCLUDE_FLAGS := $(addprefix -I, $(INCLUDE_DIRS)) $(GLIB_INCLUDE)
 
-INCLUDE_FLAGS := $(addprefix -I, $(INCLUDE_DIRS))
 CFLAGS := $(INCLUDE_FLAGS) -O2 -ggdb -Wall -Wextra -Wno-unused-parameter -Wunused -fstack-protector -Wl,-z,relro -Wformat -Wformat-security -Werror=format-security
 
 SRC_DIR := src
@@ -76,7 +76,7 @@ TEST_RUNNER_DIR := $(BUILD_DIR)/$(TEST_DIR)/runner
 TEST_OBJS := $(addprefix $(TEST_BUILD_DIR)/,$(MAIN_TEST_SRCS:.c=.o))
 MOCK_OBJS := $(addprefix $(TEST_BUILD_DIR)/,$(MAIN_MOCK_SRCS:.c=.o))
 TEST_RUNNERS := $(addprefix $(TEST_RUNNER_DIR)/,$(MAIN_TEST_SRCS:.c=.out))
-
+LIBCHECK_LIBS := $(shell pkg-config --libs check)
 .PHONY: all check clean clean_secondary setup_test_dbus
 
 all: $(GEN_SRC) $(CONNTRACK_MIGRATOR) ;
@@ -115,7 +115,7 @@ $(TEST_BUILD_DIR)/mock_%.o: $(TEST_DIR)/mock_%.c | $(TEST_BUILD_DIR)
 	$(CC) $(CFLAGS) -c -o $@ $^
 
 $(TEST_RUNNER_DIR)/test_%.out: $(GEN_OBJS) $(BUILD_DIR_SRC)/%.o $(MOCK_OBJS) $(TEST_BUILD_DIR)/test_%.o | $(TEST_RUNNER_DIR)
-	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS) -lcheck
+	$(CC) -o $@ $^ $(LDFLAGS) $(LDLIBS) $(LIBCHECK_LIBS)
 	@echo "======================= Running Test ========================="
 	DBUS_SYSTEM_BUS_ADDRESS=unix:path=/tmp/dbus/system_bus_socket ./$@
 	@echo "=============================================================="
@@ -127,7 +127,8 @@ setup_test_dbus:
 	dbus-daemon --config-file ./tests/dbus-test.conf --print-address 1 --print-pid 1
 
 check: clean_secondary setup_test_dbus $(TEST_RUNNERS)
-	pkill -9 -f "dbus-daemon --config-file ./tests/dbus-test.conf"
+	kill -9 `cat /tmp/dbus/messagebus.pid` || true
+	rm -rf /tmp/dbus
 
 clean_secondary:
 	rm -rf $(TEST_BUILD_DIR)
