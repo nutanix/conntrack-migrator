@@ -43,14 +43,15 @@ MAIN_SRCS := common.c \
 							lmct_config.c \
 							main.c
 
-DBUS_GENERATED := dbus_vmstate1.c
+DBUS_GENERATED := dbus_vmstate1.c dbus_vmstate1.h
 
 SRCS := $(addprefix $(SRC_DIR)/, $(MAIN_SRCS))
 GEN_SRCS := $(addprefix $(GEN_DIR)/, $(DBUS_GENERATED))
+GEN_C_SRCS := $(filter %.c, $(GEN_SRCS))
 
 
 OBJS := $(addprefix $(BUILD_DIR)/,$(SRCS:.c=.o))
-GEN_OBJS := $(addprefix $(BUILD_DIR)/,$(GEN_SRCS:.c=.o))
+GEN_OBJS := $(addprefix $(BUILD_DIR)/,$(GEN_C_SRCS:.c=.o))
 CONNTRACK_MIGRATOR := $(BUILD_DIR)/conntrack_migrator
 
 TEST_DIR := tests
@@ -99,10 +100,10 @@ $(GEN_DIR):
 $(GEN_SRCS): dbus-vmstate1.xml | $(GEN_DIR)
 	gdbus-codegen --interface-prefix org.qemu. --output-directory $(GEN_DIR) --generate-c-code dbus_vmstate1 --c-generate-object-manager $<
 
-$(BUILD_DIR_GEN)/%.o: $(GEN_DIR)/%.c $(GEN_SRCS)| $(BUILD_DIR_GEN)
+$(BUILD_DIR_GEN)/%.o: $(GEN_SRCS) | $(BUILD_DIR_GEN)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(BUILD_DIR_SRC)/%.o: $(SRC_DIR)/%.c $(GEN_SRCS)| $(BUILD_DIR_SRC)
+$(BUILD_DIR_SRC)/%.o: $(SRC_DIR)/%.c $(GEN_SRCS) | $(BUILD_DIR_SRC)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(CONNTRACK_MIGRATOR): $(GEN_OBJS) $(OBJS)
