@@ -79,7 +79,7 @@ TEST_RUNNERS := $(addprefix $(TEST_RUNNER_DIR)/,$(MAIN_TEST_SRCS:.c=.out))
 
 .PHONY: all check clean clean_secondary setup_test_dbus
 
-all: $(GEN_SRC) $(CONNTRACK_MIGRATOR) ;
+all: $(GEN_SRCS) $(CONNTRACK_MIGRATOR) ;
 
 $(TEST_BUILD_DIR):
 	mkdir -p $@
@@ -99,10 +99,10 @@ $(GEN_DIR):
 $(GEN_SRCS): dbus-vmstate1.xml | $(GEN_DIR)
 	gdbus-codegen --interface-prefix org.qemu. --output-directory $(GEN_DIR) --generate-c-code dbus_vmstate1 --c-generate-object-manager $<
 
-$(BUILD_DIR_GEN)/%.o: $(GEN_DIR)/%.c | $(BUILD_DIR_GEN)
+$(BUILD_DIR_GEN)/%.o: $(GEN_DIR)/%.c $(GEN_SRCS)| $(BUILD_DIR_GEN)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-$(BUILD_DIR_SRC)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR_SRC)
+$(BUILD_DIR_SRC)/%.o: $(SRC_DIR)/%.c $(GEN_SRCS)| $(BUILD_DIR_SRC)
 	$(CC) $(CFLAGS) -c -o $@ $<
 
 $(CONNTRACK_MIGRATOR): $(GEN_OBJS) $(OBJS)
