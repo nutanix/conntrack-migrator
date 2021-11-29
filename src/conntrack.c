@@ -108,6 +108,16 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
     struct in_addr *src_addr, *dst_addr;
 
     ips_to_migrate = data;
+    if (ct == NULL) {
+        LOG(ERROR, "%s: NULL conntrack entry in dump callback.", __func__);
+        return NFCT_CB_CONTINUE;
+    }
+
+    if (nfct_attr_is_set(ct, ATTR_ORIG_IPV4_SRC) <= 0 ||
+        nfct_attr_is_set(ct, ATTR_ORIG_IPV4_DST) <= 0) {
+        return NFCT_CB_CONTINUE;
+    }
+
     src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
     dst_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_DST);
 
@@ -551,6 +561,15 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
     struct delete_ct_dump_cb_args *cb_args;
     struct in_addr *src_addr, *dst_addr;
     bool in_ips_migrated, in_ips_on_host;
+
+    if (ct == NULL) {
+        LOG(ERROR, "%s: NULL conntrack entry. %s", __func__);
+        return NFCT_CB_CONTINUE;
+    }
+    if (nfct_attr_is_set(ct, ATTR_ORIG_IPV4_SRC) <= 0 ||
+        nfct_attr_is_set(ct, ATTR_ORIG_IPV4_DST) <= 0) {
+        return NFCT_CB_CONTINUE;
+    }
 
     cb_args = data;
     src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
