@@ -118,11 +118,17 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
         return NFCT_CB_CONTINUE;
     }
 
+    if (nfct_attr_is_set(ct, ATTR_ZONE) > 0 ||
+        nfct_attr_is_set(ct, ATTR_ORIG_ZONE) > 0 ||
+        nfct_attr_is_set(ct, ATTR_REPL_ZONE) > 0) {
+        return NFCT_CB_CONTINUE;
+    }
     src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
     dst_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_DST);
 
     is_entry_useful = is_src_or_dst_in_hashtable(src_addr, dst_addr,
-                                                ips_to_migrate);
+                                                 ips_to_migrate);
+
     if (is_entry_useful) {
         update_conntrack_store(conn_store, ct, type);
     }
@@ -240,6 +246,14 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
     }
 
     nfct_nlmsg_parse(nlh, ct);
+
+    if (nfct_attr_is_set(ct, ATTR_ZONE) > 0 ||
+        nfct_attr_is_set(ct, ATTR_ORIG_ZONE) > 0 ||
+        nfct_attr_is_set(ct, ATTR_REPL_ZONE) > 0) {
+        nfct_destroy(ct);
+        return MNL_CB_OK;
+    }
+
     update_conntrack_store(conn_store, ct, type);
     nfct_destroy(ct);
 
@@ -568,6 +582,11 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
     }
     if (nfct_attr_is_set(ct, ATTR_ORIG_IPV4_SRC) <= 0 ||
         nfct_attr_is_set(ct, ATTR_ORIG_IPV4_DST) <= 0) {
+        return NFCT_CB_CONTINUE;
+    }
+    if (nfct_attr_is_set(ct, ATTR_ZONE) > 0 ||
+        nfct_attr_is_set(ct, ATTR_ORIG_ZONE) > 0 ||
+        nfct_attr_is_set(ct, ATTR_REPL_ZONE) > 0) {
         return NFCT_CB_CONTINUE;
     }
 

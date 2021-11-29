@@ -203,8 +203,20 @@ flush_conntrack_for_test()
 START_TEST(test_conntrack_dump)
 {
     conn_store = create_conntrack_store();
-    int num = 5;
-    struct nf_conntrack *ct_list[5] = {
+    int num = 8;
+
+    // Entries having zone information must be ignored.
+    struct nf_conntrack *zone_entry1 = ct_new(
+        "1.1.1.1", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 6);
+    nfct_set_attr_u16(zone_entry1, ATTR_ZONE, 2);
+    struct nf_conntrack *zone_entry2 = ct_new(
+        "1.1.1.1", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 7);
+    nfct_set_attr_u16(zone_entry2, ATTR_ORIG_ZONE, 3);
+    struct nf_conntrack *zone_entry3 = ct_new(
+        "1.1.1.1", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 8);
+    nfct_set_attr_u16(zone_entry3, ATTR_REPL_ZONE, 4);
+
+    struct nf_conntrack *ct_list[8] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 1),
         ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
@@ -214,7 +226,10 @@ START_TEST(test_conntrack_dump)
         ct_new("4.4.4.4", "1.1.1.1", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 4),
         ct_new("5.5.5.5", "7.7.7.7", 1024, 9090,
-               TCP_CONNTRACK_ESTABLISHED, 1000, 5)
+               TCP_CONNTRACK_ESTABLISHED, 1000, 5),
+        zone_entry1,
+        zone_entry2,
+        zone_entry3
     };
     struct nf_conntrack *exp[4] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
@@ -343,10 +358,20 @@ END_TEST
 START_TEST(test_delete_conntrack)
 {
     conn_store = create_conntrack_store();
-    int num = 5;
+    int num = 8;
+    // Entries having zone information must be ignored.
+    struct nf_conntrack *zone_entry1 = ct_new(
+        "1.1.1.1", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 6);
+    nfct_set_attr_u16(zone_entry1, ATTR_ZONE, 2);
+    struct nf_conntrack *zone_entry2 = ct_new(
+        "1.1.1.1", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 7);
+    nfct_set_attr_u16(zone_entry2, ATTR_ORIG_ZONE, 3);
+    struct nf_conntrack *zone_entry3 = ct_new(
+        "2.2.2.2", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 8);
+    nfct_set_attr_u16(zone_entry3, ATTR_REPL_ZONE, 4);
 
-    // create 5 entries in the kernel.
-    struct nf_conntrack *ct_list[5] = {
+    // create 8 entries in the kernel.
+    struct nf_conntrack *ct_list[8] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 1),
         ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
@@ -356,7 +381,10 @@ START_TEST(test_delete_conntrack)
         ct_new("4.4.4.4", "1.1.1.1", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 4),
         ct_new("5.5.5.5", "7.7.7.7", 1024, 9090,
-               TCP_CONNTRACK_ESTABLISHED, 1000, 5)
+               TCP_CONNTRACK_ESTABLISHED, 1000, 5),
+        zone_entry1,
+        zone_entry2,
+        zone_entry3
     };
 
     int ret = flush_conntrack_for_test();
@@ -436,8 +464,19 @@ pthread_wrapper_ct_events(void *data)
 START_TEST(test_conntrack_events_for_src)
 {
     conn_store = create_conntrack_store();
-    int num = 5;
-    struct nf_conntrack *ct_list[5] = {
+    int num = 8;
+    // Entries having zone information must be ignored.
+    struct nf_conntrack *zone_entry1 = ct_new(
+        "1.1.1.1", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 6);
+    nfct_set_attr_u16(zone_entry1, ATTR_ZONE, 2);
+    struct nf_conntrack *zone_entry2 = ct_new(
+        "1.1.1.1", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 7);
+    nfct_set_attr_u16(zone_entry2, ATTR_ORIG_ZONE, 3);
+    struct nf_conntrack *zone_entry3 = ct_new(
+        "2.2.2.2", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 8);
+    nfct_set_attr_u16(zone_entry3, ATTR_REPL_ZONE, 4);
+
+    struct nf_conntrack *ct_list[8] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 1),
         ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
@@ -447,7 +486,10 @@ START_TEST(test_conntrack_events_for_src)
         ct_new("4.4.4.4", "1.1.1.1", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 4),
         ct_new("5.5.5.5", "7.7.7.7", 1024, 9090,
-               TCP_CONNTRACK_ESTABLISHED, 1000, 5)
+               TCP_CONNTRACK_ESTABLISHED, 1000, 5),
+        zone_entry1,
+        zone_entry2,
+        zone_entry3
     };
 
     int ret = flush_conntrack_for_test();
@@ -527,8 +569,19 @@ END_TEST
 START_TEST(test_conntrack_events_for_dst)
 {
     conn_store = create_conntrack_store();
-    int num = 5;
-    struct nf_conntrack *ct_list[5] = {
+    int num = 8;
+    // Entries having zone information must be ignored.
+    struct nf_conntrack *zone_entry1 = ct_new(
+        "6.6.6.6", "2.2.2.2", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 6);
+    nfct_set_attr_u16(zone_entry1, ATTR_ZONE, 2);
+    struct nf_conntrack *zone_entry2 = ct_new(
+        "7.7.7.7", "2.2.2.2", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 7);
+    nfct_set_attr_u16(zone_entry2, ATTR_ORIG_ZONE, 3);
+    struct nf_conntrack *zone_entry3 = ct_new(
+        "8.8.8.8", "1.1.1.1", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 8);
+    nfct_set_attr_u16(zone_entry3, ATTR_REPL_ZONE, 4);
+
+    struct nf_conntrack *ct_list[8] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 1),
         ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
@@ -538,7 +591,10 @@ START_TEST(test_conntrack_events_for_dst)
         ct_new("2.2.2.2", "3.3.3.3", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 4),
         ct_new("5.5.5.5", "7.7.7.7", 1024, 9090,
-               TCP_CONNTRACK_ESTABLISHED, 1000, 5)
+               TCP_CONNTRACK_ESTABLISHED, 1000, 5),
+        zone_entry1,
+        zone_entry2,
+        zone_entry3
     };
 
     int ret = flush_conntrack_for_test();
