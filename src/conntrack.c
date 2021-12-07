@@ -108,13 +108,18 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
     struct in_addr *src_addr, *dst_addr;
 
     ips_to_migrate = data;
-    if (ct == NULL) {
-        LOG(ERROR, "%s: NULL conntrack entry in dump callback.", __func__);
-        return NFCT_CB_CONTINUE;
-    }
 
     if (nfct_attr_is_set(ct, ATTR_ORIG_IPV4_SRC) <= 0 ||
         nfct_attr_is_set(ct, ATTR_ORIG_IPV4_DST) <= 0) {
+        char *buf = g_malloc0(1024);
+        if (buf != NULL) {
+            // nfct_snprintf prints only the attributes set in the entry,
+            // so we're safe wrt NULL attributes.
+            nfct_snprintf(buf, 1024, ct, type, NFCT_O_DEFAULT,
+                          NFCT_OF_SHOW_LAYER3);
+            LOG(ERROR, "%s: IPv4 address not set in entry: %s", __func__, buf);
+        }
+        g_free(buf);
         return NFCT_CB_CONTINUE;
     }
 
@@ -246,6 +251,20 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
     }
 
     nfct_nlmsg_parse(nlh, ct);
+
+    if (nfct_attr_is_set(ct, ATTR_ORIG_IPV4_SRC) <= 0 ||
+        nfct_attr_is_set(ct, ATTR_ORIG_IPV4_DST) <= 0) {
+        char *buf = g_malloc0(1024);
+        if (buf != NULL) {
+            // nfct_snprintf prints only the attributes set in the entry,
+            // so we're safe wrt NULL attributes.
+            nfct_snprintf(buf, 1024, ct, type, NFCT_O_DEFAULT,
+                          NFCT_OF_SHOW_LAYER3);
+            LOG(ERROR, "%s: IPv4 address not set in entry: %s", __func__, buf);
+        }
+        g_free(buf);
+        return MNL_CB_OK;
+    }
 
     if (nfct_attr_is_set(ct, ATTR_ZONE) > 0 ||
         nfct_attr_is_set(ct, ATTR_ORIG_ZONE) > 0 ||
@@ -576,12 +595,17 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
     struct in_addr *src_addr, *dst_addr;
     bool in_ips_migrated, in_ips_on_host;
 
-    if (ct == NULL) {
-        LOG(ERROR, "%s: NULL conntrack entry. %s", __func__);
-        return NFCT_CB_CONTINUE;
-    }
     if (nfct_attr_is_set(ct, ATTR_ORIG_IPV4_SRC) <= 0 ||
         nfct_attr_is_set(ct, ATTR_ORIG_IPV4_DST) <= 0) {
+        char *buf = g_malloc0(1024);
+        if (buf != NULL) {
+            // nfct_snprintf prints only the attributes set in the entry,
+            // so we're safe wrt NULL attributes.
+            nfct_snprintf(buf, 1024, ct, type, NFCT_O_DEFAULT,
+                          NFCT_OF_SHOW_LAYER3);
+            LOG(ERROR, "%s: IPv4 address not set in entry: %s", __func__, buf);
+        }
+        g_free(buf);
         return NFCT_CB_CONTINUE;
     }
     if (nfct_attr_is_set(ct, ATTR_ZONE) > 0 ||

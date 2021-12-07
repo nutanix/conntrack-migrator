@@ -136,6 +136,8 @@ dump_conntrack(GHashTable *ips_to_migrate)
 {
     struct nfct_handle *handle;
 
+    // Set the subscriptions for this handle to 0 since we are going to
+    // explicily request dump on this socket.
     handle = nfct_open(CONNTRACK, 0);
     if (handle == NULL) {
         LOG(ERROR, "%s: nfct_open failed. %s", __func__, strerror(errno));

@@ -87,7 +87,7 @@ foo@bar:~$ make build/tests/runner/test_common.out
 Following features are not yet supported:
  - Conntrack entries having IPv6 information will not be migrated.
  - Conntrack entries having zone information will not be migrated
-   since there is not guarntee that on the destination the same zone
+   since there is not guarantee that on the destination the same zone
    will be allocated for the VM.
 
 ## LICENSE

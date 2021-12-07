@@ -121,6 +121,43 @@ ct_new(const char *src_ip, const char *dst_ip,
     return ct;
 }
 
+struct nf_conntrack *
+ct_new_ipv6(const char *src_ip, const char *dst_ip,
+       uint16_t src_port, uint16_t dst_port,
+       enum tcp_state state, uint32_t timeout,
+       uint32_t mark)
+{
+    struct nf_conntrack *ct;
+    struct in6_addr src, dst;
+    int ret;
+
+    ct = nfct_new();
+    if (!ct) {
+        perror("nfct_new");
+        return NULL;
+    }
+    ret = inet_pton(AF_INET6, src_ip, &src);
+    ck_assert(ret == 1);
+    ret = inet_pton(AF_INET6, dst_ip, &dst);
+    ck_assert(ret == 1);
+
+    nfct_set_attr_u8(ct, ATTR_L3PROTO, AF_INET6);
+    nfct_set_attr(ct, ATTR_IPV6_SRC, &src);
+    nfct_set_attr(ct, ATTR_IPV6_DST, &dst);
+
+    nfct_set_attr_u8(ct, ATTR_L4PROTO, IPPROTO_TCP);
+    nfct_set_attr_u16(ct, ATTR_PORT_SRC, htons(src_port));
+    nfct_set_attr_u16(ct, ATTR_PORT_DST, htons(dst_port));
+
+    nfct_setobjopt(ct, NFCT_SOPT_SETUP_REPLY);
+
+    nfct_set_attr_u8(ct, ATTR_TCP_STATE, state);
+    nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
+    nfct_set_attr_u32(ct, ATTR_MARK, mark);
+
+    return ct;
+}
+
 int
 conntrack_op_for_test(struct nf_conntrack *ct_list[], int num,
                       enum nf_conntrack_query op)
@@ -203,7 +240,7 @@ flush_conntrack_for_test()
 START_TEST(test_conntrack_dump)
 {
     conn_store = create_conntrack_store();
-    int num = 8;
+    int num = 9;
 
     // Entries having zone information must be ignored.
     struct nf_conntrack *zone_entry1 = ct_new(
@@ -216,7 +253,7 @@ START_TEST(test_conntrack_dump)
         "1.1.1.1", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 8);
     nfct_set_attr_u16(zone_entry3, ATTR_REPL_ZONE, 4);
 
-    struct nf_conntrack *ct_list[8] = {
+    struct nf_conntrack *ct_list[9] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 1),
         ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
@@ -229,7 +266,9 @@ START_TEST(test_conntrack_dump)
                TCP_CONNTRACK_ESTABLISHED, 1000, 5),
         zone_entry1,
         zone_entry2,
-        zone_entry3
+        zone_entry3,
+        ct_new_ipv6("::1", "fe80::1ff:fe23:4567:890a", 1024, 9090,
+                    TCP_CONNTRACK_ESTABLISHED, 1000, 9)
     };
     struct nf_conntrack *exp[4] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
@@ -248,7 +287,7 @@ START_TEST(test_conntrack_dump)
     ret = conntrack_op_for_test(ct_list, num, NFCT_Q_CREATE);
     ck_assert(ret == 0);
 
-    struct nfct_handle *h = nfct_open(CONNTRACK, NFCT_ALL_CT_GROUPS);
+    struct nfct_handle *h = nfct_open(CONNTRACK, 0);
     ck_assert(h != NULL);
 
     const char *ips[] = { "1.1.1.1", "2.2.2.2" };
@@ -358,7 +397,7 @@ END_TEST
 START_TEST(test_delete_conntrack)
 {
     conn_store = create_conntrack_store();
-    int num = 8;
+    int num = 9;
     // Entries having zone information must be ignored.
     struct nf_conntrack *zone_entry1 = ct_new(
         "1.1.1.1", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 6);
@@ -371,7 +410,7 @@ START_TEST(test_delete_conntrack)
     nfct_set_attr_u16(zone_entry3, ATTR_REPL_ZONE, 4);
 
     // create 8 entries in the kernel.
-    struct nf_conntrack *ct_list[8] = {
+    struct nf_conntrack *ct_list[9] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 1),
         ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
@@ -384,7 +423,9 @@ START_TEST(test_delete_conntrack)
                TCP_CONNTRACK_ESTABLISHED, 1000, 5),
         zone_entry1,
         zone_entry2,
-        zone_entry3
+        zone_entry3,
+        ct_new_ipv6("::1", "fe80::1ff:fe23:4567:890a", 1024, 9090,
+                    TCP_CONNTRACK_ESTABLISHED, 1000, 9)
     };
 
     int ret = flush_conntrack_for_test();
@@ -393,7 +434,7 @@ START_TEST(test_delete_conntrack)
     ret = conntrack_op_for_test(ct_list, num, NFCT_Q_CREATE);
     ck_assert(ret == 0);
 
-    struct nfct_handle *h = nfct_open(CONNTRACK, NFCT_ALL_CT_GROUPS);
+    struct nfct_handle *h = nfct_open(CONNTRACK, 0);
     ck_assert(h != NULL);
 
     // Now migrate two ips "1.1.1.1" and "2.2.2.2"
@@ -464,7 +505,7 @@ pthread_wrapper_ct_events(void *data)
 START_TEST(test_conntrack_events_for_src)
 {
     conn_store = create_conntrack_store();
-    int num = 8;
+    int num = 9;
     // Entries having zone information must be ignored.
     struct nf_conntrack *zone_entry1 = ct_new(
         "1.1.1.1", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 6);
@@ -476,7 +517,7 @@ START_TEST(test_conntrack_events_for_src)
         "2.2.2.2", "9.9.9.9", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 8);
     nfct_set_attr_u16(zone_entry3, ATTR_REPL_ZONE, 4);
 
-    struct nf_conntrack *ct_list[8] = {
+    struct nf_conntrack *ct_list[9] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 1),
         ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
@@ -489,7 +530,9 @@ START_TEST(test_conntrack_events_for_src)
                TCP_CONNTRACK_ESTABLISHED, 1000, 5),
         zone_entry1,
         zone_entry2,
-        zone_entry3
+        zone_entry3,
+        ct_new_ipv6("::1", "fe80::1ff:fe23:4567:890a", 1024, 9090,
+                    TCP_CONNTRACK_ESTABLISHED, 1000, 9)
     };
 
     int ret = flush_conntrack_for_test();
@@ -569,7 +612,7 @@ END_TEST
 START_TEST(test_conntrack_events_for_dst)
 {
     conn_store = create_conntrack_store();
-    int num = 8;
+    int num = 9;
     // Entries having zone information must be ignored.
     struct nf_conntrack *zone_entry1 = ct_new(
         "6.6.6.6", "2.2.2.2", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 6);
@@ -581,7 +624,7 @@ START_TEST(test_conntrack_events_for_dst)
         "8.8.8.8", "1.1.1.1", 1024, 9099, TCP_CONNTRACK_ESTABLISHED, 1000, 8);
     nfct_set_attr_u16(zone_entry3, ATTR_REPL_ZONE, 4);
 
-    struct nf_conntrack *ct_list[8] = {
+    struct nf_conntrack *ct_list[9] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 1),
         ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
@@ -594,7 +637,9 @@ START_TEST(test_conntrack_events_for_dst)
                TCP_CONNTRACK_ESTABLISHED, 1000, 5),
         zone_entry1,
         zone_entry2,
-        zone_entry3
+        zone_entry3,
+        ct_new_ipv6("::1", "fe80::1ff:fe23:4567:890a", 1024, 9090,
+                    TCP_CONNTRACK_ESTABLISHED, 1000, 9)
     };
 
     int ret = flush_conntrack_for_test();
