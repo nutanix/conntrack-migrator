@@ -75,6 +75,45 @@ is_src_or_dst_in_hashtable(struct in_addr *src, struct in_addr *dst,
     return (src_in_ht || dst_in_ht);
 }
 
+/**
+ * Checks if the conntrack entry is valid.
+ *
+ * Conntrack entry is considered valid (migration supported) if:
+ *  - source and destination IPv4 addresses are set.
+ *  - Zone information is not present.
+ *
+ * Args:
+ *   @type nf message type.
+ *   @ct pointer to the conntrack entry.
+ *
+ * Returns:
+ *   true in case the CT entry passes the above mentioned checks,
+ *   false otherwise
+ */
+static bool
+validate_ct_entry(enum nf_conntrack_msg_type type, struct nf_conntrack *ct)
+{
+    if (nfct_attr_is_set(ct, ATTR_ORIG_IPV4_SRC) <= 0 ||
+        nfct_attr_is_set(ct, ATTR_ORIG_IPV4_DST) <= 0) {
+        char *buf = g_malloc0(1024);
+        // nfct_snprintf prints only the attributes set in the entry,
+        // so we're safe wrt NULL attributes.
+        nfct_snprintf(buf, 1024, ct, type, NFCT_O_DEFAULT,
+                      NFCT_OF_SHOW_LAYER3);
+        LOG(ERROR, "%s: IPv4 address not set in entry: %s", __func__, buf);
+        g_free(buf);
+        return false;
+    }
+
+    if (nfct_attr_is_set(ct, ATTR_ZONE) > 0 ||
+        nfct_attr_is_set(ct, ATTR_ORIG_ZONE) > 0 ||
+        nfct_attr_is_set(ct, ATTR_REPL_ZONE) > 0) {
+        return false;
+    }
+
+    return true;
+}
+
 //////////////////////////////////////////////////////////////////////
 //          START OF DUMP related functions                         //
 /////////////////////////////////////////////////////////////////////
@@ -108,11 +147,17 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
     struct in_addr *src_addr, *dst_addr;
 
     ips_to_migrate = data;
+
+    if (!validate_ct_entry(type, ct)) {
+        return NFCT_CB_CONTINUE;
+    }
+
     src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
     dst_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_DST);
 
     is_entry_useful = is_src_or_dst_in_hashtable(src_addr, dst_addr,
-                                                ips_to_migrate);
+                                                 ips_to_migrate);
+
     if (is_entry_useful) {
         update_conntrack_store(conn_store, ct, type);
     }
@@ -230,6 +275,11 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
     }
 
     nfct_nlmsg_parse(nlh, ct);
+
+    if (!validate_ct_entry(type, ct)) {
+        return MNL_CB_OK;
+    }
+
     update_conntrack_store(conn_store, ct, type);
     nfct_destroy(ct);
 
@@ -551,6 +601,10 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
     struct delete_ct_dump_cb_args *cb_args;
     struct in_addr *src_addr, *dst_addr;
     bool in_ips_migrated, in_ips_on_host;
+
+    if (!validate_ct_entry(type, ct)) {
+        return NFCT_CB_CONTINUE;
+    }
 
     cb_args = data;
     src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
