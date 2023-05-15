@@ -198,18 +198,19 @@ handle_update_event(struct conntrack_store *conn_store,
     if (ct_entry == NULL) {
         LOG(VERBOSE, "%s: Update received for a non-existent entry. "
             "Treating it as NEW.", __func__);
-        handle_new_event(conn_store, ct);
-        return;
+        res_ct_entry = conntrack_entry_from_nf_conntrack(ct);
+    } else {
+        res_ct_entry = get_conntrack_entry_from_update(ct_entry, ct);
     }
 
-    res_ct_entry = get_conntrack_entry_from_update(ct_entry, ct);
     if (res_ct_entry == NULL) {
         LOG(WARNING, "%s: received res_ct_entry as NULL", __func__);
-        return;
+        goto finish;
     }
 
-    pthread_mutex_lock(&conn_store->lock);
-    g_hash_table_replace(conn_store->store, key, res_ct_entry);
+    g_hash_table_insert(conn_store->store, key, res_ct_entry);
+
+finish:
     pthread_mutex_unlock(&conn_store->lock);
 }
 
