@@ -194,7 +194,6 @@ handle_update_event(struct conntrack_store *conn_store,
     const gpointer key = GUINT_TO_POINTER(ct_id);
     pthread_mutex_lock(&conn_store->lock);
     ct_entry = g_hash_table_lookup(conn_store->store, key);
-    pthread_mutex_unlock(&conn_store->lock);
     if (ct_entry == NULL) {
         LOG(VERBOSE, "%s: Update received for a non-existent entry. "
             "Treating it as NEW.", __func__);
