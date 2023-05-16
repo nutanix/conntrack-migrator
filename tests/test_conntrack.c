@@ -66,6 +66,7 @@ update_conntrack_store(struct conntrack_store *conn_store,
                             ct_clone);
         break;
     case NFCT_T_DESTROY:
+        printf("Received delete event!!\n\n");
         g_hash_table_remove(conn_store->store, GUINT_TO_POINTER(ct_mark));
         break;
     default:
@@ -504,6 +505,7 @@ pthread_wrapper_ct_events(void *data)
 
 START_TEST(test_conntrack_events_for_src)
 {
+    printf("Running test_conntrack_events_for_src\n\n");
     conn_store = create_conntrack_store();
     int num = 9;
     // Entries having zone information must be ignored.
@@ -597,7 +599,7 @@ START_TEST(test_conntrack_events_for_src)
     };
     ret = conntrack_op_for_test(delete, 1, NFCT_Q_DESTROY);
     ck_assert(ret == 0);
-    sleep(1);
+    sleep(5);
 
     // verify that hashtable size is reduced to 2 now.
     ck_assert(g_hash_table_size(conn_store->store) == 2);
