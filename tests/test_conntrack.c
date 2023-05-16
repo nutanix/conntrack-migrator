@@ -240,6 +240,7 @@ flush_conntrack_for_test()
 
 START_TEST(test_conntrack_dump)
 {
+    printf("Running test_conntrack_dump\n\n");
     conn_store = create_conntrack_store();
     int num = 9;
 
@@ -312,6 +313,7 @@ END_TEST
 
 START_TEST(test_append_ct_to_batch)
 {
+    printf("Running test_append_ct_to_batch\n\n");
     struct nf_conntrack *ct_list[5] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 1),
@@ -351,6 +353,7 @@ END_TEST
 
 START_TEST(test_create_batch_conntrack)
 {
+    printf("Running test_create_batch_conntrack\n\n");
     struct nf_conntrack *ct_list[5] = {
         ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
                TCP_CONNTRACK_ESTABLISHED, 1000, 1),
@@ -397,6 +400,7 @@ END_TEST
 
 START_TEST(test_delete_conntrack)
 {
+    printf("Running test_delete_conntrack\n\n");
     conn_store = create_conntrack_store();
     int num = 9;
     // Entries having zone information must be ignored.
@@ -602,7 +606,8 @@ START_TEST(test_conntrack_events_for_src)
     sleep(5);
 
     // verify that hashtable size is reduced to 2 now.
-    ck_assert(g_hash_table_size(conn_store->store) == 2);
+    uint32_t hash_size = g_hash_table_size(conn_store->store);
+    ck_assert_msg(hash_size == 2, "hashtaable size %d", hash_size);
     ct = g_hash_table_lookup(conn_store->store, GUINT_TO_POINTER(3));
     ck_assert(ct == NULL);
 
