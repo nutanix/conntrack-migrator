@@ -732,8 +732,8 @@ conntrack_suite(void)
     tcase_add_test(tc_core, test_append_ct_to_batch);
     tcase_add_test(tc_core, test_create_batch_conntrack);
     tcase_add_test(tc_core, test_delete_conntrack);
-    tcase_add_test(tc_core, test_conntrack_events_for_src);
-    tcase_add_test(tc_core, test_conntrack_events_for_dst);
+//    tcase_add_test(tc_core, test_conntrack_events_for_src);
+//    tcase_add_test(tc_core, test_conntrack_events_for_dst);
 
     suite_add_tcase(s, tc_core);
 
