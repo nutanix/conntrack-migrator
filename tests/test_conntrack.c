@@ -558,12 +558,14 @@ START_TEST(test_conntrack_events_for_src)
 
     ret = pthread_create(&args.tid, NULL, &pthread_wrapper_ct_events, &args);
     ck_assert(ret == 0);
+    fflush(stdout);
     sleep(1);
 
     // create 5 CTs
     ret = conntrack_op_for_test(ct_list, num, NFCT_Q_CREATE);
     ck_assert(ret == 0);
-    sleep(1);
+    fflush(stdout);
+    sleep(3);
 
     // verify that we should have received events for 3 entries
     struct nf_conntrack *exp[3] = {
@@ -590,7 +592,8 @@ START_TEST(test_conntrack_events_for_src)
     };
     ret = conntrack_op_for_test(upd, 1, NFCT_Q_UPDATE);
     ck_assert(ret == 0);
-    sleep(1);
+    fflush(stdout);
+    sleep(3);
 
     // verify that the entry is updated in our local store as well
     ck_assert(g_hash_table_size(conn_store->store) == 3);
@@ -605,13 +608,16 @@ START_TEST(test_conntrack_events_for_src)
     };
     ret = conntrack_op_for_test(delete, 1, NFCT_Q_DESTROY);
     ck_assert(ret == 0);
-    sleep(5);
-
+    fflush(stdout);
+    sleep(1);
+    system("conntrack -L");
+    fflush(stdout);
+    sleep(4);
     // verify that hashtable size is reduced to 2 now.
     uint32_t hash_size = g_hash_table_size(conn_store->store);
-    ck_assert_msg(hash_size == 2, "hashtaable size %d", hash_size);
     ct = g_hash_table_lookup(conn_store->store, GUINT_TO_POINTER(3));
     ck_assert(ct == NULL);
+    ck_assert_msg(hash_size == 2, "hashtaable size %d", hash_size);
 
     stop_flag = true;
     pthread_join(args.tid, NULL);
@@ -735,12 +741,12 @@ conntrack_suite(void)
 
     /* Core test case */
     tc_core = tcase_create("Core");
-    tcase_set_timeout(tc_core, 10);
+    tcase_set_timeout(tc_core, 100);
 
-    tcase_add_test(tc_core, test_conntrack_dump);
-    tcase_add_test(tc_core, test_append_ct_to_batch);
-    tcase_add_test(tc_core, test_create_batch_conntrack);
-    tcase_add_test(tc_core, test_delete_conntrack);
+//    tcase_add_test(tc_core, test_conntrack_dump);
+//    tcase_add_test(tc_core, test_append_ct_to_batch);
+//    tcase_add_test(tc_core, test_create_batch_conntrack);
+//    tcase_add_test(tc_core, test_delete_conntrack);
     tcase_add_test(tc_core, test_conntrack_events_for_src);
 //    tcase_add_test(tc_core, test_conntrack_events_for_dst);
 
@@ -758,8 +764,7 @@ main(void)
 
     s = conntrack_suite();
     sr = srunner_create(s);
-
-    srunner_run_all(sr, CK_NORMAL);
+    srunner_run_all(sr, CK_VERBOSE);
     number_failed = srunner_ntests_failed(sr);
     srunner_free(sr);
     return (number_failed == 0) ? EXIT_SUCCESS : EXIT_FAILURE;

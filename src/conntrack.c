@@ -275,6 +275,10 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
     }
 
     nfct_nlmsg_parse(nlh, ct);
+    char buf[1024];
+    nfct_snprintf(buf, sizeof(buf), ct,
+                type, NFCT_O_DEFAULT, 0);
+    LOG(ERROR, "%s: %s", __func__, buf);
 
     if (!validate_ct_entry(type, ct)) {
         return MNL_CB_OK;
