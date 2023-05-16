@@ -58,15 +58,17 @@ update_conntrack_store(struct conntrack_store *conn_store,
 
     switch(type) {
     case NFCT_T_NEW:
+        printf("Received new event!! %d\n\n", ct_mark);
         g_hash_table_insert(conn_store->store, GUINT_TO_POINTER(ct_mark),
                             ct_clone);
         break;
     case NFCT_T_UPDATE:
+        printf("Received update event!! %d\n\n", ct_mark);
         g_hash_table_insert(conn_store->store, GUINT_TO_POINTER(ct_mark),
                             ct_clone);
         break;
     case NFCT_T_DESTROY:
-        printf("Received delete event!!\n\n");
+        printf("Received delete event!! %d\n\n", ct_mark);
         g_hash_table_remove(conn_store->store, GUINT_TO_POINTER(ct_mark));
         break;
     default:
