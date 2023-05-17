@@ -45,28 +45,45 @@ create_conntrack_store(void)
 uint32_t insert_id = 1;
 uint32_t update_id = 2;
 
+gboolean cmp_ct(gpointer key, gpointer value, gpointer user_data) {
+  struct nf_conntrack *ct = value;
+  struct nf_conntrack *ct_ev = user_data;
+
+    return (nfct_get_attr_u8(ct, ATTR_ID) ==
+            nfct_get_attr_u8(ct_ev, ATTR_ID));
+}
+
 void
 update_conntrack_store(struct conntrack_store *conn_store,
                        struct nf_conntrack *ct,
                        enum nf_conntrack_msg_type type)
 {
-    // for the purpose of testing we are using ct mark as id. because
+    // For the purpose of testing we are using ct mark as id. because
     // ct_id is not known while programming so validation becomes easier.
+    // All new and update events created by entry will have ct_mark set.
+    // For kernel version 5.x, we are not getting ct_mark for delete
+    // event from kernel. For delete event instead of using ct_mark,
+    // we are now iterating over the complete hashtable and match entries
+    // based on ct_id.
     uint32_t ct_mark;
     struct nf_conntrack *ct_clone = nfct_clone(ct);
     ct_mark = nfct_get_attr_u32(ct, ATTR_MARK);
 
     switch(type) {
     case NFCT_T_NEW:
-        g_hash_table_insert(conn_store->store, GUINT_TO_POINTER(ct_mark),
-                            ct_clone);
+        if (ct_mark) {
+            g_hash_table_insert(conn_store->store, GUINT_TO_POINTER(ct_mark),
+                                ct_clone);
+        }
         break;
     case NFCT_T_UPDATE:
-        g_hash_table_insert(conn_store->store, GUINT_TO_POINTER(ct_mark),
-                            ct_clone);
+        if (ct_mark) {
+            g_hash_table_insert(conn_store->store, GUINT_TO_POINTER(ct_mark),
+                                ct_clone);
+        }
         break;
     case NFCT_T_DESTROY:
-        g_hash_table_remove(conn_store->store, GUINT_TO_POINTER(ct_mark));
+        g_hash_table_foreach_remove(conn_store->store, cmp_ct, ct_clone);
         break;
     default:
         break;
