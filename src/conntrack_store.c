@@ -204,12 +204,10 @@ handle_update_event(struct conntrack_store *conn_store,
 
     if (res_ct_entry == NULL) {
         LOG(WARNING, "%s: received res_ct_entry as NULL", __func__);
-        goto finish;
+    } else {
+        g_hash_table_insert(conn_store->store, key, res_ct_entry);
     }
 
-    g_hash_table_insert(conn_store->store, key, res_ct_entry);
-
-finish:
     pthread_mutex_unlock(&conn_store->lock);
 }
 
