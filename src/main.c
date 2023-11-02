@@ -23,12 +23,12 @@
  * capability.
  *
  * Usage:
- *  - SAVE mode: DBUS_SESSION_BUS_ADDRESS=<dbus address> conntrack_migrator 2 <dbus_helper_id> <num_ip_addresses> <space separated ip address list>
- *  - LOAD mode: DBUS_SESSION_BUS_ADDRESS=<dbus address> conntrack_migrator 1 <dbus_helper_id>
+ *  - SAVE mode: conntrack_migrator 2 <dbus_helper_id> <num_ip_addresses> <space separated ip address list>
+ *  - LOAD mode: conntrack_migrator 1 <dbus_helper_id>
  *
  *  eg:
- *  - SAVE mode: DBUS_SESSION_BUS_ADDRESS=unix:abstract=/abc,guid=def conntrack_migrator 2 helper1 2 1.1.1.1 2.2.2.2
- *  - LOAD mode: DBUS_SESSION_BUS_ADDRESS=unix:abstract=/abc,guid=def conntrack_migrator 1 helper1
+ *  - SAVE mode: conntrack_migrator 2 helper1 2 1.1.1.1 2.2.2.2
+ *  - LOAD mode: conntrack_migrator 1 helper1
  */
 
 #define _GNU_SOURCE
@@ -334,8 +334,6 @@ dmain(int argc, char *argv[])
     set_log_level(lmct_conf.log_lvl);
 
     LOG(INFO, "%s: Starting in mode %s", __func__, mode_to_string[mode]);
-    LOG(INFO, "%s: dbus address %s", __func__,
-        getenv("DBUS_SYSTEM_BUS_ADDRESS"));
     LOG(INFO, "%s: helper id: %s", __func__, helper_id);
     LOG(INFO, "%s: Maximum CT entries migratable: %d", __func__,
         lmct_conf.max_entries_to_migrate);
@@ -392,12 +390,9 @@ err_usage(void)
 {
     errx(EXIT_FAILURE,
         "Usage:\n"
-        "SAVE mode: DBUS_SYSTEM_BUS_ADDRESS=<dbus address> "
-        "conntrack_migrator 2 <dbus_helper_id> <num_ip_addresses> "
+        "SAVE mode: conntrack_migrator 2 <dbus_helper_id> <num_ip_addresses> "
         "<space separated ip address list>\n"
-        "LOAD mode: DBUS_SYSTEM_BUS_ADDRESS=<dbus address> "
-        "conntrack_migrator 1 <dbus_helper_id>\n"
-        "NOTE: DBUS_SYSTEM_BUS_ADDRESS env variable should be set.\n");
+        "LOAD mode: conntrack_migrator 1 <dbus_helper_id>\n");
 }
 
 /**
@@ -412,19 +407,6 @@ check_mode(int mode)
     if ((mode != LOAD_MODE) && (mode != SAVE_MODE)) {
         errx(EXIT_FAILURE, "Incorrect mode passed. Should be 1 (LOAD) or "
                 "2 (SAVE)\n");
-    }
-}
-
-/**
- * Checks if the DBUS_SYSTEM_BUS_ADDRESS env variable is set.
- */
-static void
-check_dbus_address_env(void)
-{
-    const char *dbus_address = getenv("DBUS_SYSTEM_BUS_ADDRESS");
-    if (dbus_address == NULL || strcmp(dbus_address, "") == 0) {
-        errx(EXIT_FAILURE, "DBUS_SYSTEM_BUS_ADDRESS environment variable not "
-                "set\n");
     }
 }
 
@@ -464,8 +446,7 @@ check_save_mode_args(int argc, char *argv[])
  *
  * Checks performed:
  * 1. Mode is vaild
- * 2. DBUS_SYSTEM_BUS_ADDRESS env is set
- * 3. SAVE mode has proper arguments
+ * 2. SAVE mode has proper arguments
  *
  * Args:
  *   @argc num of arguemnts
@@ -479,8 +460,6 @@ check_args(int argc, char *argv[])
     if (argc < 3) {
         err_usage();
     }
-
-    check_dbus_address_env();
 
     mode = atoi(argv[MODE_ARG_INDEX]);
     check_mode(mode);
