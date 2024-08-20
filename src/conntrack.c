@@ -302,7 +302,7 @@ create_nfct_filter(GHashTable *ips, bool is_src_filter)
 {
     struct nfct_filter *filter;
     GHashTableIter iter;
-    gpointer key;
+    gpointer key = NULL;
 
     filter = nfct_filter_create();
     if (filter == NULL) {
@@ -609,6 +609,11 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
     cb_args = data;
     src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
     dst_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_DST);
+    if (src_addr == NULL || dst_addr == NULL) {
+        LOG(WARNING, "%s: ct entry with NULL src/dst IP received. Skipping.",
+            __func__);
+        return NFCT_CB_FAILURE;
+    }
     in_ips_migrated = is_src_or_dst_in_hashtable(src_addr, dst_addr,
                                                  cb_args->ips_migrated);
     in_ips_on_host = is_src_or_dst_in_hashtable(src_addr, dst_addr,
@@ -616,6 +621,11 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
 
     if (in_ips_migrated && !in_ips_on_host) {
         uint32_t ct_id = nfct_get_attr_u32(ct, ATTR_ID);
+        if (ct_id == 0) {
+            LOG(WARNING, "%s: ct entry with 0 id received. Skipping.",
+                __func__);
+            return NFCT_CB_FAILURE;
+        }
         g_hash_table_insert(cb_args->ct_store, GUINT_TO_POINTER(ct_id), ct);
         return NFCT_CB_STOLEN;
     }
@@ -637,10 +647,10 @@ static int
 ct_entry_delete(struct nfct_handle *h, struct nf_conntrack *ct)
 {
     int ret;
+    char buf[1024] = {0};
 
     ret = nfct_query(h, NFCT_Q_DESTROY, ct);
     if (ret == -1) {
-        char buf[1024];
         nfct_snprintf(buf, sizeof(buf), ct, NFCT_T_UNKNOWN,
                       NFCT_O_DEFAULT, NFCT_OF_SHOW_LAYER3);
         LOG(WARNING, "%s: Failed to delete the conntrack entry %s. "
@@ -688,7 +698,7 @@ _delete_ct_entries(struct nfct_handle *handle,
     int ret, failed, success;
     GHashTable *ct_store; // Hashtable to store the CT entries to be deleted
     GHashTableIter iter;  // Iterator for ct_store
-    gpointer key, value;
+    gpointer key, value = NULL;
 
     ct_store = g_hash_table_new_full(g_direct_hash, g_direct_equal,
                                      NULL, ct_destroy_g_wrapper);

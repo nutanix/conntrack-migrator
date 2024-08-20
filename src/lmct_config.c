@@ -80,6 +80,7 @@ populate_log_level(GKeyFile *key_file, struct lmct_config *conf)
         int lvl;
 
         lvl = parse_log_level_str(val);
+        g_free((gpointer)val);
         if (lvl == -1) {
             LOG(ERROR, "%s: Unable to parse log level in config.", __func__);
             exit(EXIT_FAILURE);

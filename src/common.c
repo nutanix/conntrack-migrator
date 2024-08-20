@@ -48,7 +48,7 @@ create_hashtable_from_ip_list(const char *ip_list[], int num_ips)
     ht = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, NULL);
 
     for (i = 0; i < num_ips; i++) {
-        struct in_addr ip;
+        struct in_addr ip = {0};
         int success;
 
         success = inet_aton(ip_list[i], &ip);
@@ -63,9 +63,10 @@ create_hashtable_from_ip_list(const char *ip_list[], int num_ips)
                 g_hash_table_destroy(ht);
                 return NULL;
             }
+        } else {
+            g_hash_table_insert(ht, GUINT_TO_POINTER(ip.s_addr),
+                                GINT_TO_POINTER(1));
         }
-        g_hash_table_insert(ht, GUINT_TO_POINTER(ip.s_addr),
-                            GINT_TO_POINTER(1));
     }
 
     return ht;

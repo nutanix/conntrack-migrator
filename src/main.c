@@ -213,8 +213,8 @@ start_in_save_mode(GHashTable *ips_to_migrate, bool *stop_flag)
     }
     ret = pthread_setname_np(ct_del_args.tid, "ct_delete");
     if (ret != 0) {
-        LOG(WARNING, "%s: Failed to set thread name \"ct_delete\"", __func__,
-            strerror(ret));
+        LOG(WARNING, "%s: Failed to set thread name \"ct_delete\": %s",
+            __func__, strerror(ret));
     }
 
     // Listen for conntrack events which contains their src IP address

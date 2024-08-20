@@ -42,7 +42,7 @@ conntrack_store_new(void)
     struct conntrack_store *conn_store;
     int ret;
 
-    conn_store = g_malloc(sizeof(struct conntrack_store));
+    conn_store = g_malloc0(sizeof(struct conntrack_store));
     conn_store->store = g_hash_table_new_full(g_direct_hash, g_direct_equal,
                                               NULL,
                                               conntrack_entry_destroy_g_wrapper);
