@@ -15,6 +15,7 @@
 #include <fcntl.h>
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -60,20 +61,28 @@ const char *log_dir = "/var/log/conntrack_migrator";
  * Returns:
  *   number of bytes written in buffer.
  */
-static int
+static uint32_t
 put_timestamp(char *buf)
 {
     struct timespec tp;
+    struct tm* tm_info = NULL;
+    size_t num_bytes = 0;
     int ret;
 
     ret = clock_gettime(CLOCK_REALTIME, &tp);
     if (ret == -1) {
         printf("ERROR: can't get the clock time. \n");
-        return 0;
+        return num_bytes;
     }
-    ret = strftime(buf, 100, "%F %T", gmtime(&tp.tv_sec));
-    ret += snprintf(buf + ret, 100, ".%06u", tp.tv_nsec/1000);
-    return ret;
+
+    tm_info = gmtime(&tp.tv_sec);
+    if (tm_info == NULL) {
+        printf("ERROR: can't get the clock time. \n");
+        return num_bytes;
+    }
+    num_bytes = strftime(buf, 100, "%F %T", tm_info);
+    num_bytes += snprintf(buf + num_bytes, 100, ".%06ld", tp.tv_nsec/1000);
+    return num_bytes;
 }
 
 /**
@@ -91,10 +100,10 @@ put_timestamp(char *buf)
  * Returns:
  *   number of bytes written.
  */
-static int
+static uint32_t
 putbuf(char *buf, int level, const char *format,  va_list ap)
 {
-    int _written = 0;
+    uint32_t _written = 0;
     _written += put_timestamp(buf);
     _written += snprintf(buf + _written,
                          MAX_BUF_LEN - _written,
@@ -238,13 +247,16 @@ parse_log_level(enum log_level lvl)
 
     switch(lvl) {
     case VERBOSE:
-        log_level |= VERBOSE;
+        log_level = VERBOSE|INFO|WARNING|ERROR;
+        break;
     case INFO:
-        log_level |= INFO;
+        log_level = INFO|WARNING|ERROR;
+        break;
     case WARNING:
-        log_level |= WARNING;
+        log_level = WARNING|ERROR;
+        break;
     case ERROR:
-        log_level |= ERROR;
+        log_level = ERROR;
         break;
     default:
         log_level = INFO|WARNING|ERROR;
@@ -295,12 +307,15 @@ set_log_level(enum log_level level)
 int
 init_log(enum log_level lvl, const char *helper_id)
 {
-    struct stat st = { 0 };
-    char *log_file_path;
+    char *log_file_path = NULL;
     int level, fd;
 
-    if (stat(log_dir, &st) == -1) {
-        mkdir(log_dir, 0700);
+    if (mkdir(log_dir, 0700) == -1) {
+        if (errno != EEXIST) {
+            printf("ERROR: Cannot create dir %s. %s\n", log_dir,
+                   strerror(errno));
+            goto err;
+        }
     }
 
     log_file_path = g_malloc0(sizeof(char) * 512);
@@ -319,6 +334,7 @@ init_log(enum log_level lvl, const char *helper_id)
     config->pid = getpid();
     config->fd = fd;
 
+    g_free(log_file_path);
     return 0;
 
 err:

@@ -308,7 +308,7 @@ conntrack_entry_to_string(struct conntrack_entry *ct_entry)
         tmp_u8 = offset_ptr;
         written = snprintf_tcp_flags(buf + cur_offset, size_left, *tmp_u8,
                                        false);
-        offset_ptr += ct_entry_attr_to_size[CT_ATTR_TCP_ORIG_FLAGS_VALUE];
+        offset_ptr += ct_entry_attr_to_size[CT_ATTR_TCP_REPL_FLAGS_VALUE];
         UPDATE_OFFSET(size_left, cur_offset, written);
     }
 

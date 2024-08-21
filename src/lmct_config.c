@@ -37,10 +37,10 @@ struct lmct_config lmct_conf = {
  * Args:
  *   @val log level string
  * Returns:
- *   int log level representation if success in parsing,
- *   -1 otherwise
+ *   enum: logging level if success in parsing.
+ *   INFO level is chosen as default in case of parsing error.
  */
-static int
+static enum log_level
 parse_log_level_str(const char *val)
 {
     if (strcmp(val, "VERBOSE") == 0) {
@@ -55,7 +55,8 @@ parse_log_level_str(const char *val)
     if (strcmp(val, "ERROR") == 0) {
         return ERROR;
     }
-    return -1;
+    LOG(ERROR, "%s: Unable to parse log level in config. %s", __func__, val);
+    return INFO;
 }
 
 /**
@@ -77,15 +78,8 @@ populate_log_level(GKeyFile *key_file, struct lmct_config *conf)
 
     val = g_key_file_get_string(key_file, "LOG", "level", &error);
     if (val != NULL) {
-        int lvl;
-
-        lvl = parse_log_level_str(val);
-        if (lvl == -1) {
-            LOG(ERROR, "%s: Unable to parse log level in config.", __func__);
-            exit(EXIT_FAILURE);
-        }
-
-        conf->log_lvl = lvl;
+        conf->log_lvl = parse_log_level_str(val);
+        g_free((gpointer)val);
         return;
     }
 

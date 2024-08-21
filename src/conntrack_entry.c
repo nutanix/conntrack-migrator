@@ -445,10 +445,9 @@ get_conntrack_entry_from_update(struct conntrack_entry *ct_entry,
                 offset = offset + ct_entry_attr_to_size[i];
             }
         }
-
         // Case 4: attribute set in conntrack_entry but not in update
-        if (is_set_in_bitmap(ct_entry->bitmap, i) &&
-            nfct_attr_is_set(ct, nf_ct_attr) <= 0) {
+        else if ((is_set_in_bitmap(ct_entry->bitmap, i) &&
+                 nfct_attr_is_set(ct, nf_ct_attr) <= 0)) {
             // Take value from original entry
             attr_value = offset;
             offset = offset + ct_entry_attr_to_size[i];

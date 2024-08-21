@@ -213,8 +213,8 @@ start_in_save_mode(GHashTable *ips_to_migrate, bool *stop_flag)
     }
     ret = pthread_setname_np(ct_del_args.tid, "ct_delete");
     if (ret != 0) {
-        LOG(WARNING, "%s: Failed to set thread name \"ct_delete\"", __func__,
-            strerror(ret));
+        LOG(WARNING, "%s: Failed to set thread name \"ct_delete\": %s",
+            __func__, strerror(ret));
     }
 
     // Listen for conntrack events which contains their src IP address
@@ -350,7 +350,7 @@ dmain(int argc, char *argv[])
     // Start the dbus server
     dbus_server_args.helper_id = helper_id;
     dbus_server_args.stop_flag = &stop_flag;
-    dbus_server_args.mode = mode;
+    dbus_server_args.mode = (enum op_mode) mode;
     ret = pthread_create(&dbus_server_args.tid,
                          NULL, dbus_server_init,
                          &dbus_server_args);

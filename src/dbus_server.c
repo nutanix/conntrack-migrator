@@ -100,7 +100,12 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
     char send_buf[MNL_SOCKET_BUFFER_SIZE * 2];
     void *curr_batch_offset;
     struct mnl_nlmsg_batch *batch;
-    int seq = time(NULL);
+    struct timespec tp;
+    int seq = 1;
+
+    if (clock_gettime(CLOCK_REALTIME, &tp) != -1) {
+        seq = (int)tp.tv_sec;
+    }
 
     LOG(INFO, "%s: Load start", __func__);
     args = g_dbus_method_invocation_get_parameters(invocation);
@@ -287,7 +292,7 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
 {
     LOG(INFO, "%s: Clear start", __func__);
     GVariant *args, *var;
-    gsize num_ip_address;
+    gsize num_ip_address = 0;
     char **ip_addresses;
     GHashTable *ips_on_host;
 
@@ -359,6 +364,7 @@ on_bus_acquired(GDBusConnection *connection, const gchar *name,
     const gchar *g_obj_path;
     g_obj_path  = g_strdup_printf("%s", object_path);
     obj_skeleton = object_skeleton_new(g_obj_path);
+    g_free((gpointer)g_obj_path);
     object_skeleton_set_vmstate1(obj_skeleton, vmstate1_obj);
     object_skeleton_set_lmct_mgmt(obj_skeleton, lmct_mgmt_obj);
 

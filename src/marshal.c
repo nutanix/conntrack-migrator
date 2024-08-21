@@ -43,7 +43,7 @@ calculate_payload_size(struct conntrack_store *conn_store,
 {
     uint32_t payload_size = 0;
     GHashTableIter iter;
-    gpointer key, value;
+    gpointer key, value = NULL;
     struct conntrack_entry *ct_entry;
 
     // First is payload size itself -> uint32_t
@@ -138,13 +138,13 @@ marshal_conntrack_store(void *start, struct conntrack_store *conn_store)
     LOG(VERBOSE, "%s: writing CT entries.", __func__);
 
     GHashTableIter iter;
-    gpointer key, value;
+    gpointer key, value = NULL;
 
     // Write the CT entries.
     pthread_mutex_lock(&conn_store->lock);
     g_hash_table_iter_init(&iter, conn_store->store);
     while (g_hash_table_iter_next(&iter, &key, &value)) {
-        struct conntrack_entry *ct_entry;
+        struct conntrack_entry *ct_entry = NULL;
         ct_entry = (struct conntrack_entry *)value;
 
         // Write the bitmap
@@ -198,7 +198,7 @@ handle_no_data_to_migrate(uint32_t *data_size)
  */
 void *
 marshal(struct conntrack_store *conn_store, struct data_template *data_tmpl,
-                uint32_t *data_size)
+        uint32_t *data_size)
 {
     uint32_t num_ct_entries = 0;
     void *buffer, *buffer_offset;
@@ -214,7 +214,11 @@ marshal(struct conntrack_store *conn_store, struct data_template *data_tmpl,
     if (num_ct_entries == 0) {
         LOG(INFO, "%s: No entries to migrate. Skipping conntrack store "
             "marshalling", __func__);
-        return handle_no_data_to_migrate(data_size);
+        if (data_size == NULL) {
+            return NULL;
+        } else {
+            return handle_no_data_to_migrate(data_size);
+        }
     }
 
     // CASE 2: Data to migrate exceeds the limit set by the user. This is
