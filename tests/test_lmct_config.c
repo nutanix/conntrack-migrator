@@ -95,24 +95,17 @@ END_TEST
 
 START_TEST(test_lmct_config_invalid_log_level)
 {
-    int pid = fork();
-    int status;
-    ck_assert(pid >= 0);
+    init_config_for_test();
+    char conf_str[] = "[CONNTRACK]\n"
+                      "max_entries_to_migrate=100\n"
+                      "[LOG]\n"
+                      "level=abcdef\n";
+    prepare_config_file(conf_str);
+    init_lmct_config(conf_path);
+    cleanup();
 
-    if (pid == 0) {
-        char conf_str[] = "[CONNTRACK]\n"
-                          "max_entries_to_migrate=100\n"
-                          "[LOG]\n"
-                          "level=abcdef\n";
-
-        prepare_config_file(conf_str);
-        init_lmct_config(conf_path);
-        exit(EXIT_SUCCESS);
-    } else {
-        waitpid(pid, &status, 0);
-        cleanup();
-        ck_assert(WEXITSTATUS(status) == EXIT_FAILURE);
-    }
+    ck_assert(lmct_conf.max_entries_to_migrate == 100);
+    ck_assert(lmct_conf.log_lvl == INFO);
 }
 END_TEST
 

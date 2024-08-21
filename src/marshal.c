@@ -198,7 +198,7 @@ handle_no_data_to_migrate(uint32_t *data_size)
  */
 void *
 marshal(struct conntrack_store *conn_store, struct data_template *data_tmpl,
-                uint32_t *data_size)
+        uint32_t *data_size)
 {
     uint32_t num_ct_entries = 0;
     void *buffer, *buffer_offset;
@@ -214,7 +214,11 @@ marshal(struct conntrack_store *conn_store, struct data_template *data_tmpl,
     if (num_ct_entries == 0) {
         LOG(INFO, "%s: No entries to migrate. Skipping conntrack store "
             "marshalling", __func__);
-        return handle_no_data_to_migrate(data_size);
+        if (data_size == NULL) {
+            return NULL;
+        } else {
+            return handle_no_data_to_migrate(data_size);
+        }
     }
 
     // CASE 2: Data to migrate exceeds the limit set by the user. This is

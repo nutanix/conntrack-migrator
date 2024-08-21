@@ -350,7 +350,7 @@ dmain(int argc, char *argv[])
     // Start the dbus server
     dbus_server_args.helper_id = helper_id;
     dbus_server_args.stop_flag = &stop_flag;
-    dbus_server_args.mode = mode;
+    dbus_server_args.mode = (enum op_mode) mode;
     ret = pthread_create(&dbus_server_args.tid,
                          NULL, dbus_server_init,
                          &dbus_server_args);

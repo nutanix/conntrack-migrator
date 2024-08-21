@@ -247,13 +247,16 @@ parse_log_level(enum log_level lvl)
 
     switch(lvl) {
     case VERBOSE:
-        log_level |= VERBOSE;
+        log_level = VERBOSE|INFO|WARNING|ERROR;
+        break;
     case INFO:
-        log_level |= INFO;
+        log_level = INFO|WARNING|ERROR;
+        break;
     case WARNING:
-        log_level |= WARNING;
+        log_level = WARNING|ERROR;
+        break;
     case ERROR:
-        log_level |= ERROR;
+        log_level = ERROR;
         break;
     default:
         log_level = INFO|WARNING|ERROR;
@@ -304,14 +307,13 @@ set_log_level(enum log_level level)
 int
 init_log(enum log_level lvl, const char *helper_id)
 {
-    struct stat st = { 0 };
     char *log_file_path = NULL;
-    int ret, level, fd;
+    int level, fd;
 
-    if (stat(log_dir, &st) == -1) {
-        ret = mkdir(log_dir, 0700);
-        if (ret == -1) {
-            printf("ERROR: Cannot create dir %s. \n", log_dir);
+    if (mkdir(log_dir, 0700) == -1) {
+        if (errno != EEXIST) {
+            printf("ERROR: Cannot create dir %s. %s\n", log_dir,
+                   strerror(errno));
             goto err;
         }
     }
