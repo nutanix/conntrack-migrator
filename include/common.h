@@ -20,4 +20,7 @@
 GHashTable *
 create_hashtable_from_ip_list(const char *[], int);
 
+GHashTable *
+create_hashtable_from_ct_zones_list(const char *[], int);
+
 #endif /* COMMON_H */

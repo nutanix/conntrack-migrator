@@ -31,6 +31,7 @@ struct lmct_config lmct_conf = {
     .max_entries_to_migrate = MAX_ENTRIES_TO_MIGRATE
 };
 
+enum filter_type fltr_type;
 /**
  * Validate the level option read from config file.
  *
@@ -130,6 +131,11 @@ populate_max_entries_to_migrate(GKeyFile *key_file, struct lmct_config *conf)
     LOG(INFO, "%s: max_entries_to_migrate not found in config.", __func__);
 
     conf->max_entries_to_migrate = MAX_ENTRIES_TO_MIGRATE;
+}
+
+void
+populate_filter_type(enum filter_type ft) {
+    fltr_type = ft;
 }
 
 /**

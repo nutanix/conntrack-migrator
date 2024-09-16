@@ -95,7 +95,6 @@ conntrack_store_insert(struct conntrack_store *conn_store,
 {
     uint32_t ct_id;
     struct conntrack_entry *ct_entry;
-
     ct_id = nfct_get_attr_u32(ct, ATTR_ID);
     if (ct_id == 0) {
         LOG(WARNING, "%s: CT with ID = 0 received!", __func__);
@@ -116,8 +115,6 @@ conntrack_store_insert(struct conntrack_store *conn_store,
 }
 
 /**
- * Deletes the entry from the conntrack_store.
- *
  * This function extracts the ctid from the ct argument and then removes the
  * entry corresponding to the Ctid from the hashtable. Even if the entry is
  * not present in hashtable, the function treats it as a success.
@@ -161,6 +158,7 @@ static void
 handle_new_event(struct conntrack_store *conn_store,
                  struct nf_conntrack *ct)
 {
+    LOG(INFO, "Mansi: %s", __func__);
     conntrack_store_insert(conn_store, ct);
 }
 
@@ -185,6 +183,7 @@ handle_update_event(struct conntrack_store *conn_store,
     struct conntrack_entry *ct_entry;
     struct conntrack_entry *res_ct_entry;
 
+    LOG(INFO, "Mansi: %s", __func__);
     ct_id = nfct_get_attr_u32(ct, ATTR_ID);
     if (ct_id == 0) {
         LOG(WARNING, "%s: ct entry with 0 id received. Skipping.", __func__);
@@ -223,6 +222,7 @@ static void
 handle_destroy_event(struct conntrack_store *conn_store,
                      struct nf_conntrack *ct)
 {
+    LOG(INFO, "Mansi: %s", __func__);
     int ret = conntrack_store_remove(conn_store, ct);
     if (ret == -1) {
         LOG(WARNING, "%s: CT entry with 0 id received. Skipping.", __func__);

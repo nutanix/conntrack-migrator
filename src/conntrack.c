@@ -34,6 +34,7 @@
 #include "conntrack_entry.h"
 #include "conntrack_store.h"
 #include "ct_delete_args.h"
+#include "lmct_config.h"
 #include "log.h"
 
 /* Type definition for CT dump callbacks. */
@@ -105,10 +106,12 @@ validate_ct_entry(enum nf_conntrack_msg_type type, struct nf_conntrack *ct)
         return false;
     }
 
-    if (nfct_attr_is_set(ct, ATTR_ZONE) > 0 ||
-        nfct_attr_is_set(ct, ATTR_ORIG_ZONE) > 0 ||
-        nfct_attr_is_set(ct, ATTR_REPL_ZONE) > 0) {
-        return false;
+    if(fltr_type == FILTER_BY_IP) {
+        if (nfct_attr_is_set(ct, ATTR_ZONE) > 0 ||
+            nfct_attr_is_set(ct, ATTR_ORIG_ZONE) > 0 ||
+            nfct_attr_is_set(ct, ATTR_REPL_ZONE) > 0) {
+            return false;
+        }
     }
 
     return true;
@@ -131,7 +134,7 @@ validate_ct_entry(enum nf_conntrack_msg_type type, struct nf_conntrack *ct)
  *   @type nf message type.
  *   @ct pointer to the conntrack entry received.
  *   @data pointer to the data sent to the callback. In this case it is
- *         ips_to_migrate hashtable.
+ *         struct ct_events_targs.
  *
  * Returns:
  *   NFCT_CB_CONTINUE representing continue processing of
@@ -144,21 +147,32 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
 {
     bool is_entry_useful;
     GHashTable *ips_to_migrate;
+    GHashTable *ct_zones_to_migrate;
     struct in_addr *src_addr, *dst_addr;
-
-    ips_to_migrate = data;
+    struct ct_events_targs *cb_args = (struct ct_events_targs *)data;
+    uint16_t zone;
 
     if (!validate_ct_entry(type, ct)) {
         return NFCT_CB_CONTINUE;
     }
 
-    src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
-    dst_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_DST);
+    if (fltr_type == FILTER_BY_IP) {
+        ips_to_migrate = (GHashTable *)cb_args->ips_to_migrate;
+        src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
+        dst_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_DST);
 
-    is_entry_useful = is_src_or_dst_in_hashtable(src_addr, dst_addr,
-                                                 ips_to_migrate);
+        is_entry_useful = is_src_or_dst_in_hashtable(src_addr, dst_addr,
+                                                     ips_to_migrate);
+        LOG(INFO, "Mansi: %s %s", __func__, is_entry_useful ? "true": false);
+    } else {
+        zone = nfct_get_attr_u16(ct, ATTR_ZONE);
+        ct_zones_to_migrate = (GHashTable *)cb_args->ct_zones_to_migrate;
+        is_entry_useful = g_hash_table_contains(ct_zones_to_migrate,
+                                                GUINT_TO_POINTER(zone));
+    }
 
     if (is_entry_useful) {
+        LOG(INFO, "Mansi: adding for zone %u %s", zone, __func__);
         update_conntrack_store(conn_store, ct, type);
     }
 
@@ -208,18 +222,19 @@ _conntrack_dump(struct nfct_handle *h, dump_cb cb, void *cb_args)
  *
  * Args:
  *   @handle handle to the netlink socket.
- *   @ips_to_migrate IP addresses to be used for filtering the CT entries.
+ *   @struct ct_events_targs struct ct_events_targs ct_zones_to_migrate or
+ *      ips_to_migrate need to be present depending upon filtr_type set.
  *
  * Returns:
  *   0 if the operation was successful. -1 otherwise.
  */
 int
-get_conntrack_dump(struct nfct_handle *handle, GHashTable *ips_to_migrate)
+get_conntrack_dump(struct nfct_handle *handle, struct ct_events_targs *data)
 {
     int ret;
 
     LOG(INFO, "%s: Conntrack dump start", __func__);
-    ret = _conntrack_dump(handle, conntrack_dump_callback, ips_to_migrate);
+    ret = _conntrack_dump(handle, conntrack_dump_callback, data);
     LOG(INFO, "%s: Conntrack dump end", __func__);
 
     return ret;
@@ -235,8 +250,8 @@ get_conntrack_dump(struct nfct_handle *handle, GHashTable *ips_to_migrate)
  *
  * Args:
  *   @nlh pointer to the netlink message header.
- *   @data pointer to the data sent to the callback. Here it's the
- *     stop_flag which indicates whether to stop processing further events.
+ *   @data pointer to the data sent to the callback. Here it's the struct
+ *     ct_events_targs.
  *
  * Returns:
  *  - MNL_CB_STOP if we need to stop further event processing.
@@ -249,8 +264,10 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
     enum nf_conntrack_msg_type type = NFCT_T_UNKNOWN;
     struct nf_conntrack *ct;
     bool *stop_flag;
-
-    stop_flag = (bool *)data;
+    GHashTable *ct_zones_to_migrate;
+    struct ct_events_targs *cb_args = (struct ct_events_targs *)data;
+    stop_flag = (bool *)cb_args->stop_flag;
+    ct_zones_to_migrate = (GHashTable *)cb_args->ct_zones_to_migrate;
     if (*stop_flag) {
         return MNL_CB_STOP;
     }
@@ -280,19 +297,27 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
         return MNL_CB_OK;
     }
 
-    update_conntrack_store(conn_store, ct, type);
+    uint16_t zone;
+    zone = nfct_get_attr_u16(ct, ATTR_ZONE);
+
+    bool add_to_conntrack_store = true;
+    if( fltr_type == FILTER_BY_CT_ZONE  &&
+        !g_hash_table_contains(ct_zones_to_migrate, GUINT_TO_POINTER(zone))){
+        add_to_conntrack_store = false;
+    }
+
+    if (add_to_conntrack_store){
+        LOG(INFO, "%s : Updating zone %u entry in conntrack store", __func__,
+            zone);
+        update_conntrack_store(conn_store, ct, type);
+    }
     nfct_destroy(ct);
 
     return MNL_CB_OK;
 }
 
 /**
- * Creates a nfct_filter for the IP addresses to migrate.
- *
- * Args:
- * @ips pointer to the GHashTable containing IP addresses.
- * @is_src_filter bool representing if filter is to be applied on the
- *   src field of CT entries.
+ * Creates a nfct_filter depending upin nfct_filter.
  *
  * Returns:
  *   pointer to the nfct_filter if success, NULL otherwise.
@@ -306,31 +331,36 @@ create_nfct_filter(GHashTable *ips, bool is_src_filter)
 
     filter = nfct_filter_create();
     if (filter == NULL) {
-        LOG(ERROR, "%s: Failed to create a filter. %s", __func__,
+        LOG(ERROR, "%s: Failed to create a filter for ct zones. %s", __func__,
             strerror(errno));
         exit(EXIT_FAILURE);
     }
 
-    g_hash_table_iter_init(&iter, ips);
-    while (g_hash_table_iter_next(&iter, &key, NULL)) {
-        uint32_t ip = GPOINTER_TO_UINT(key);
+    if (fltr_type == FILTER_BY_IP) {
+        LOG(INFO, "Mansi: Setting filter for IPS %s", __func__);
+        GHashTableIter iter;
+        gpointer key;
 
-        struct nfct_filter_ipv4 filter_ipv4 = {
-            .addr = ntohl(ip),
-            .mask = 0xffffffff,
-        };
+        g_hash_table_iter_init(&iter, ips);
+        while (g_hash_table_iter_next(&iter, &key, NULL)) {
+            uint32_t ip = GPOINTER_TO_UINT(key);
+            LOG(INFO, "adding ip into filter %u %s", key, __func__);
+            struct nfct_filter_ipv4 filter_ipv4 = {
+                .addr = ntohl(ip),
+                .mask = 0xffffffff,
+            };
 
-        enum nfct_filter_attr filter_type;
-        if (is_src_filter) {
-            filter_type = NFCT_FILTER_SRC_IPV4;
-        } else {
-            filter_type = NFCT_FILTER_DST_IPV4;
+            enum nfct_filter_attr filter_type;
+            if (is_src_filter) {
+                filter_type = NFCT_FILTER_SRC_IPV4;
+            } else {
+                filter_type = NFCT_FILTER_DST_IPV4;
+            }
+
+            nfct_filter_add_attr(filter, filter_type, &filter_ipv4);
+            nfct_filter_set_logic(filter, filter_type, NFCT_FILTER_LOGIC_POSITIVE);
         }
-
-        nfct_filter_add_attr(filter, filter_type, &filter_ipv4);
-        nfct_filter_set_logic(filter, filter_type, NFCT_FILTER_LOGIC_POSITIVE);
     }
-
     return filter;
 }
 
@@ -359,10 +389,11 @@ create_nfct_filter(GHashTable *ips, bool is_src_filter)
  */
 int
 listen_for_conntrack_events(struct mnl_socket *nl,
-                            GHashTable *ips_to_migrate,
-                            bool is_src_filter,
-                            bool *stop_flag)
+                            struct ct_events_targs *ct_events_targs)
 {
+    GHashTable *ips_to_migrate = ct_events_targs->ips_to_migrate;
+    bool is_src_filter = ct_events_targs->is_src;
+    bool *stop_flag = ct_events_targs->stop_flag;
     int ret = 0;
     int fd;
     char buf[MNL_SOCKET_BUFFER_SIZE];
@@ -375,9 +406,8 @@ listen_for_conntrack_events(struct mnl_socket *nl,
     };
 
     fd = mnl_socket_get_fd(nl);
-
-    // Attach the IP based filter to the socket.
     filter = create_nfct_filter(ips_to_migrate, is_src_filter);
+    // Attach the filter to the socket.
     filter_attach_ret = nfct_filter_attach(fd, filter);
     if (filter_attach_ret == -1) {
         LOG(ERROR, "%s: Failed to attach filter to the socket. %s", __func__,
@@ -427,7 +457,8 @@ listen_for_conntrack_events(struct mnl_socket *nl,
             break;
         }
 
-        ret = mnl_cb_run(buf, ret, 0, 0, conntrack_events_callback, stop_flag);
+        ret = mnl_cb_run(buf, ret, 0, 0, conntrack_events_callback, 
+                         ct_events_targs);
         if (ret == MNL_CB_STOP) {
             LOG(INFO, "%s: Stopping the callback", __func__);
             break;

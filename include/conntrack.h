@@ -29,17 +29,22 @@
  * the conntrack events.
  */
 struct ct_events_targs {
-    pthread_t tid;              // thread ID
-    GHashTable *ips_to_migrate; // IPs for which CT events needs to be listened
-    bool *stop_flag; // Flag when True, stop listening for CT events
-    bool is_src; // Flag indicating whether the args are for src based events
+    pthread_t tid;                      // thread ID
+    GHashTable *ips_to_migrate;         // IPs for which CT events needs to be
+                                        // listened
+    GHashTable *ct_zones_to_migrate;    // CT Zones for which events needs to
+                                        // be listened
+    bool *stop_flag;                    // Flag when True, stop listening for
+                                        // CT events
+    bool is_src;                        // Flag indicating whether the args are
+                                        // for src based events
 };
 
 int
-get_conntrack_dump(struct nfct_handle *, GHashTable *);
+get_conntrack_dump(struct nfct_handle *, struct ct_events_targs *);
 
 int
-listen_for_conntrack_events(struct mnl_socket *, GHashTable *, bool, bool *);
+listen_for_conntrack_events(struct mnl_socket *, struct ct_events_targs *);
 
 void
 append_ct_to_batch(char *, struct nf_conntrack *, uint32_t *, int);

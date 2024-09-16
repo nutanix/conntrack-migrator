@@ -59,6 +59,8 @@
 #define HELPER_ID_ARG_INDEX 2
 #define NUM_IP_ADDR_ARG_INDEX 3
 #define IP_ADDR_LIST_ARG_INDEX 4
+#define NUM_CT_ZONES_ARG_INDEX 4
+#define CT_ZONES_LIST_ARG_INDEX 5
 
 #define MAX_IP_ADDRESSES_SUPPORTED 127
 
@@ -114,8 +116,7 @@ pthread_wrapper_ct_events(void *data)
         return NULL;
     }
 
-    listen_for_conntrack_events(nl, targs->ips_to_migrate,
-                                targs->is_src, targs->stop_flag);
+    listen_for_conntrack_events(nl, targs);
     mnl_socket_close(nl);
 
     LOG(INFO, "%s: Finished conntrack events. is_src = %d", __func__,
@@ -130,9 +131,10 @@ pthread_wrapper_ct_events(void *data)
  *
  * Args:
  *   @ips_to_migrate IP addresses used to filter the required CT entries.
+ *   @ct_zones_to_migrate CT Zones used to filter the required CT entries.
  */
 static void
-dump_conntrack(GHashTable *ips_to_migrate)
+dump_conntrack(struct ct_events_targs *ct_events_targs)
 {
     struct nfct_handle *handle;
 
@@ -143,36 +145,105 @@ dump_conntrack(GHashTable *ips_to_migrate)
         LOG(ERROR, "%s: nfct_open failed. %s", __func__, strerror(errno));
         return;
     }
-    get_conntrack_dump(handle, ips_to_migrate);
+    get_conntrack_dump(handle, ct_events_targs);
     nfct_close(handle);
 }
 
 /**
- * Start threads required for save mode of operation.
- *
- * Following things are performed in the save mode:
- * 1. Conntrack delete thread is started which waits till Clear IPC is called.
- * 2. Conntrack events threads are started to filter events for the IP
- *    addresses present in the ips_to_migrate. If any update is received for a
- *    non-exisitent entry, it is treated as NEW since it contains the base five
- *    tuple information required to identify flow. Similarly, if a destroy
- *    event is received for a non-existent entry, it is ignored.
- * 3. Finally, Conntrack dump is taken from the kernel to get all the live
- *    flows in the system.
- *
- * The above workflow is used to maintain a local copy of the CT entries for
- * the VM.
- *
- * Args:
- *   @ips_to_migrate Hashtable of IP addresses for which CT entries
- *                   have to be migrated.
- *   @stop_flag flag used by thread to exit after dbus operations.
- *
- * Returns:
- *   0 in case of success, -1 otherwise
- */
+* Start threads required for save mode of operation when filter type is
+* FILTER_BY_CT_ZONE.
+*
+* Following things are performed in the save mode:
+* 1. Conntrack events threads are started to filter events for the CT
+*    zones present in the ct_zones_to_migrate. If any update is received for a
+*    non-exisitent entry, it is treated as NEW since it contains the base five
+*    tuple information required to identify flow. Similarly, if a destroy
+*    event is received for a non-existent entry, it is ignored.
+* 2. Finally, Conntrack dump is taken from the kernel to get all the live
+*    flows in the system.
+*
+* The above workflow is used to maintain a local copy of the CT entries for
+* the VM.
+*
+* Args:
+*   @ct_zones_to_migrate Hashtable of CT zones for which CT entries
+*                   have to be migrated.
+*   @stop_flag flag used by thread to exit after dbus operations.
+*
+* Returns:
+*   0 in case of success, -1 otherwise
+*/
 static int
-start_in_save_mode(GHashTable *ips_to_migrate, bool *stop_flag)
+start_in_save_mode_for_ct_zones(GHashTable *ct_zones_to_migrate,
+                                bool *stop_flag)
+{
+    int ret;
+    uint32_t num_ct_zones;
+    struct ct_events_targs *targs;
+
+    num_ct_zones = g_hash_table_size(ct_zones_to_migrate);
+
+    if (num_ct_zones == 0) {
+        LOG(INFO, "%s: Not starting any save mode threads since number of"
+            "ct-zones is 0", __func__);
+        return 0;
+    }
+
+    targs = g_malloc0(sizeof(struct ct_events_targs));
+    targs->ct_zones_to_migrate = ct_zones_to_migrate;
+    targs->stop_flag = stop_flag;
+    targs->is_src = true;
+    ret = pthread_create(&targs->tid, NULL, &pthread_wrapper_ct_events,
+                         (void *)targs);
+    if (ret != 0) {
+        LOG(ERROR, "%s: src events thread creation failed. %s", __func__,
+            strerror(ret));
+        return -1;
+    }
+    ret = pthread_setname_np(targs->tid, "ct_events_src");
+    if (ret != 0) {
+        LOG(WARNING, "%s: Failed to set thread name \"ct_events_src\". %s",
+            __func__, strerror(ret));
+    }
+
+    dump_conntrack(targs);
+
+    // Wait for all the threads to be stopped.
+    pthread_join(targs->tid, NULL);
+
+    g_free(targs);
+
+    return 0;
+}
+
+
+/**
+* Start threads required for save mode of operation when filter type is
+* FILTER_BY_IP.
+*
+* Following things are performed in the save mode:
+* 1. Conntrack delete thread is started which waits till Clear IPC is called.
+* 2. Conntrack events threads are started to filter events for the IP
+*    addresses present in the ips_to_migrate. If any update is received for a
+*    non-exisitent entry, it is treated as NEW since it contains the base five
+*    tuple information required to identify flow. Similarly, if a destroy
+*    event is received for a non-existent entry, it is ignored.
+* 3. Finally, Conntrack dump is taken from the kernel to get all the live
+*    flows in the system.
+*
+* The above workflow is used to maintain a local copy of the CT entries for
+* the VM.
+*
+* Args:
+*   @ips_to_migrate Hashtable of IP addresses for which CT entries
+*                   have to be migrated.
+*   @stop_flag flag used by thread to exit after dbus operations.
+*
+* Returns:
+*   0 in case of success, -1 otherwise
+*/
+static int
+start_in_save_mode_for_ip(GHashTable *ips_to_migrate, bool *stop_flag)
 {
     int ret;
     uint32_t num_ips;
@@ -257,7 +328,9 @@ start_in_save_mode(GHashTable *ips_to_migrate, bool *stop_flag)
     }
 
     // Get all the conntrack entries for the given ip address.
-    dump_conntrack(ips_to_migrate);
+    // Because ips_to_migrate is same in case of src/dst targs we can use any
+    // one of them.
+    dump_conntrack(src_targs);
 
     // Wait for all the threads to be stopped.
     pthread_join(src_targs->tid, NULL);
@@ -271,30 +344,66 @@ start_in_save_mode(GHashTable *ips_to_migrate, bool *stop_flag)
 }
 
 /**
- * Creates hashtable of IP addresses from CLI arguments.
+ * Start threads required for save mode of operation.
+ * The workflow is used to maintain a local copy of the CT entries for
+ * the VM.
+ *
+ * Args:
+ *   @ips_to_migrate Hashtable of IP addresses for which CT entries
+ *                   have to be migrated.
+ *   @ct_zones_to_migrate Hashtable of Ct zones for which CT entries have to be
+ *                        migrated.
+ *   @stop_flag flag used by thread to exit after dbus operations.
+ *
+ * Returns:
+ *   0 in case of success, -1 otherwise
+ */
+static int
+start_in_save_mode(GHashTable *ips_to_migrate, GHashTable *ct_zones_to_migrate,
+                   bool *stop_flag)
+{
+    if ( fltr_type == FILTER_BY_IP ) {
+        return start_in_save_mode_for_ip(ips_to_migrate, stop_flag);
+    }
+
+    return start_in_save_mode_for_ct_zones(ct_zones_to_migrate, stop_flag);
+}
+
+
+/**
+ * Creates hashtable of IP addresses/ CT Zones from CLI arguments.
  *
  * Args:
  *   @argv array of CLI args.
  *
  * Returns:
- *   Resulting hashtable containing IP address(uint32_t) as key.
+ *   Resulting hashtable containing IP address/CT zones(uint32_t)  as key.
  */
-static GHashTable *
-create_ips_ht_from_args(char *argv[])
+GHashTable *
+get_entity_ht_from_args(char *argv[])
 {
-    int num_ips;
-    GHashTable *ht;
-
-    num_ips = atoi(argv[NUM_IP_ADDR_ARG_INDEX]);
-    const char **ips = (const char **)(argv + IP_ADDR_LIST_ARG_INDEX);
-
-    ht = create_hashtable_from_ip_list(ips, num_ips);
-    if (ht == NULL) {
-        LOG(ERROR, "%s: Hashtable creation failed.", __func__);
-        return NULL;
+    if (fltr_type == FILTER_BY_IP) {
+        int num_ips;
+        GHashTable *ips_to_migrate;
+        num_ips = atoi(argv[NUM_IP_ADDR_ARG_INDEX]);
+        const char **ip_list = (const char **)(argv + IP_ADDR_LIST_ARG_INDEX);
+        ips_to_migrate = create_hashtable_from_ip_list(ip_list, num_ips);
+        if (ips_to_migrate == NULL) {
+            LOG(ERROR, "%s: Hashtable creation failed.", __func__);
+        }
+        return ips_to_migrate;
     }
 
-    return ht;
+    int num_zones;
+    GHashTable *ct_zones_to_migrate;
+    num_zones = atoi(argv[NUM_CT_ZONES_ARG_INDEX]);
+    const char **zone_list = (const char **)(argv + CT_ZONES_LIST_ARG_INDEX);
+    ct_zones_to_migrate = create_hashtable_from_ct_zones_list(zone_list, 
+                                                              num_zones);
+    if (ct_zones_to_migrate == NULL) {
+        LOG(ERROR, "%s: Hashtable creation failed.", __func__);
+    }
+    return ct_zones_to_migrate;
 }
 
 /**
@@ -333,7 +442,14 @@ dmain(int argc, char *argv[])
     // set the logging level read from config.
     set_log_level(lmct_conf.log_lvl);
 
+    int i;
+    for (i = 0; i < argc; i++) {
+        LOG(INFO, "Mansi: Argument %d: %s\n", i, argv[i]);
+    }
+
     LOG(INFO, "%s: Starting in mode %s", __func__, mode_to_string[mode]);
+    LOG(INFO, "%s: Starting in filter on basis of %s", __func__, 
+        fltr_type == FILTER_BY_IP ? "IP Addresses" : "CT Zones");
     LOG(INFO, "%s: dbus address %s", __func__,
         getenv("DBUS_SYSTEM_BUS_ADDRESS"));
     LOG(INFO, "%s: helper id: %s", __func__, helper_id);
@@ -367,19 +483,26 @@ dmain(int argc, char *argv[])
 
     // Start save mode threads.
     if (mode == SAVE_MODE) {
-        GHashTable *ips_to_migrate;
-        ips_to_migrate = create_ips_ht_from_args(argv);
-        if (ips_to_migrate == NULL) {
-            return EINVAL;
+        GHashTable *ips_to_migrate = NULL;
+        GHashTable *ct_zones_to_migrate = NULL;
+
+        if (fltr_type == FILTER_BY_IP) {
+            ips_to_migrate = get_entity_ht_from_args(argv);
+        } else {
+            ct_zones_to_migrate = get_entity_ht_from_args(argv);
         }
 
-        ret = start_in_save_mode(ips_to_migrate, &stop_flag);
+        if (ips_to_migrate == NULL && ct_zones_to_migrate == NULL) {
+                return EINVAL;
+        }
+        ret = start_in_save_mode(ips_to_migrate, ct_zones_to_migrate,
+                                 &stop_flag);
         g_hash_table_destroy(ips_to_migrate);
+        g_hash_table_destroy(ct_zones_to_migrate);
         if (ret != 0) {
             return EAGAIN;
         }
     }
-
     pthread_join(dbus_server_args.tid, NULL);
     conntrack_store_destroy(conn_store);
     close_log();
@@ -447,16 +570,46 @@ check_dbus_address_env(void)
 static void
 check_save_mode_args(int argc, char *argv[])
 {
-    int num_ip_addr;
+    if (fltr_type == FILTER_BY_IP) {
+        int num_ip_addr;
+        num_ip_addr = atoi(argv[NUM_IP_ADDR_ARG_INDEX]);
+        if (num_ip_addr < 0 || num_ip_addr > (argc - IP_ADDR_LIST_ARG_INDEX)) {
+            errx(EXIT_FAILURE, "Invalid argument for number of IP addresses");
+        }
+    } else if (fltr_type == FILTER_BY_CT_ZONE) {
+        int num_ct_zones;
+        num_ct_zones = atoi(argv[NUM_CT_ZONES_ARG_INDEX]);
+        if (num_ct_zones < 0 || num_ct_zones > (argc - CT_ZONES_LIST_ARG_INDEX)) {
+            errx(EXIT_FAILURE, "Invalid argument for number of CT Zones");
+        }
+    } else {
+        errx(EXIT_FAILURE, "Filter type not set properly");
+    }
+    return;
+}
+
+static void
+set_filter_type(int argc, char * argv[]){
 
     if (argc < 4) {
-        errx(EXIT_FAILURE, "Number of IP addresses not present in args");
+        errx(EXIT_FAILURE, "Number of IP addresses/ ct-zones not present in args");
     }
 
+    // Deciding filterting type - ct_zone/ip_addr, on value
+    // of NUM_IP_ADDR_ARG_INDEX if this -1 then ct zone else
+    // it will be no of ip addr provided. This hack is to support
+    // older versions.
+    int num_ip_addr;
     num_ip_addr = atoi(argv[NUM_IP_ADDR_ARG_INDEX]);
-    if (num_ip_addr < 0 || num_ip_addr > (argc - IP_ADDR_LIST_ARG_INDEX)) {
-        errx(EXIT_FAILURE, "Invalid argument for number of IP addresses");
+    if (num_ip_addr >= 0) {
+        populate_filter_type(FILTER_BY_IP);
+    } else if (num_ip_addr == -1){
+        populate_filter_type(FILTER_BY_CT_ZONE);
+    } else {
+        errx(EXIT_FAILURE, "Number of IP addresses/ ct-zones not present" 
+             "in args");
     }
+    return;
 }
 
 /**
@@ -480,10 +633,12 @@ check_args(int argc, char *argv[])
         err_usage();
     }
 
-    check_dbus_address_env();
+    //check_dbus_address_env();
 
     mode = atoi(argv[MODE_ARG_INDEX]);
     check_mode(mode);
+
+    set_filter_type(argc, argv);
 
     if (mode == SAVE_MODE) {
         check_save_mode_args(argc, argv);
