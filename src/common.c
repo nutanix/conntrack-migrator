@@ -71,3 +71,38 @@ create_hashtable_from_ip_list(const char *ip_list[], int num_ips)
 
     return ht;
 }
+
+/**
+ * Creates hashtable from CT Zones list.
+ *
+ * This function allocates a hashtable which converts the string
+ * based ct zones  into uint32_t format and store them into hashtable
+ * for fast lookup operations. They key for the hashtable is the uint32_t
+ * ct zones, and value is ignored (kept as 1).
+ *
+ * Args:
+ *   @ct_zones_list list of string CT Zones
+ *   @num_ct_zones number of CT Zones in the list
+ *
+ * Returns:
+ *   Resulting hashtable containing CT Zones as key
+ *   In case memory allocation fails, the process is terminated.
+ *   NULL, in case an invalid IP address is present in the ip_list.
+ */
+GHashTable *
+create_hashtable_from_ct_zones_list(const char *ct_zones_list[],
+                                    int num_ct_zones)
+{
+    int i;
+    GHashTable *ht;
+
+    ht = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, NULL);
+    for (i = 0; i < num_ct_zones; i++) {
+        LOG(VERBOSE, "%s : Trying to insert %u ct_zone into ht", __func__,
+            atoi(ct_zones_list[i]));
+        g_hash_table_insert(ht, GUINT_TO_POINTER(atoi(ct_zones_list[i])),
+                            GINT_TO_POINTER(1));
+    }
+
+    return ht;
+}

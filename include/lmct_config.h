@@ -19,6 +19,11 @@
 
 #include "log.h"
 
+
+enum filter_type {
+    FILTER_BY_CT_ZONE,
+    FILTER_BY_IP
+};
 /**
  * Represents the config options which are used globally in the application.
  */
@@ -29,7 +34,11 @@ struct lmct_config {
 
 extern struct lmct_config lmct_conf;
 
+extern enum filter_type fltr_type;
 void
 init_lmct_config();
+
+void
+populate_filter_type(enum filter_type);
 
 #endif /* LMCT_CONFIG_H */
