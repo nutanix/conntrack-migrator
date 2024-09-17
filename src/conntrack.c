@@ -163,7 +163,6 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
 
         is_entry_useful = is_src_or_dst_in_hashtable(src_addr, dst_addr,
                                                      ips_to_migrate);
-        LOG(INFO, "Mansi: %s %s", __func__, is_entry_useful ? "true": false);
     } else {
         zone = nfct_get_attr_u16(ct, ATTR_ZONE);
         ct_zones_to_migrate = (GHashTable *)cb_args->ct_zones_to_migrate;
@@ -172,7 +171,6 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
     }
 
     if (is_entry_useful) {
-        LOG(INFO, "Mansi: adding for zone %u %s", zone, __func__);
         update_conntrack_store(conn_store, ct, type);
     }
 
@@ -297,18 +295,20 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
         return MNL_CB_OK;
     }
 
-    uint16_t zone;
-    zone = nfct_get_attr_u16(ct, ATTR_ZONE);
-
     bool add_to_conntrack_store = true;
-    if( fltr_type == FILTER_BY_CT_ZONE  &&
-        !g_hash_table_contains(ct_zones_to_migrate, GUINT_TO_POINTER(zone))){
-        add_to_conntrack_store = false;
+    if( fltr_type == FILTER_BY_CT_ZONE ){
+        uint16_t zone;
+        zone = nfct_get_attr_u16(ct, ATTR_ZONE);
+        gboolean ct_contains_zone;
+        ct_contains_zone = g_hash_table_contains(ct_zones_to_migrate,
+                                                 GUINT_TO_POINTER(zone));
+        if (!ct_contains_zone) {
+            add_to_conntrack_store = false;
+        }
     }
 
     if (add_to_conntrack_store){
-        LOG(INFO, "%s : Updating zone %u entry in conntrack store", __func__,
-            zone);
+        LOG(INFO, "%s : Updating entry in conntrack store", __func__);
         update_conntrack_store(conn_store, ct, type);
     }
     nfct_destroy(ct);
@@ -326,8 +326,6 @@ static struct nfct_filter *
 create_nfct_filter(GHashTable *ips, bool is_src_filter)
 {
     struct nfct_filter *filter;
-    GHashTableIter iter;
-    gpointer key = NULL;
 
     filter = nfct_filter_create();
     if (filter == NULL) {
@@ -337,14 +335,12 @@ create_nfct_filter(GHashTable *ips, bool is_src_filter)
     }
 
     if (fltr_type == FILTER_BY_IP) {
-        LOG(INFO, "Mansi: Setting filter for IPS %s", __func__);
         GHashTableIter iter;
         gpointer key;
 
         g_hash_table_iter_init(&iter, ips);
         while (g_hash_table_iter_next(&iter, &key, NULL)) {
             uint32_t ip = GPOINTER_TO_UINT(key);
-            LOG(INFO, "adding ip into filter %u %s", key, __func__);
             struct nfct_filter_ipv4 filter_ipv4 = {
                 .addr = ntohl(ip),
                 .mask = 0xffffffff,
