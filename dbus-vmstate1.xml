@@ -17,8 +17,11 @@ GNU General Public License version 2.
   </interface>
   <interface name="org.qemu.lmct.Mgmt">
     <property name="Id" type="s" access="read"/>
+    <!-- Payload shape depends on helper's SAVE mode (ct_del_args.kind):
+         IPs   : strv of IPv4 addresses still on this host.
+         Zones : flat paired strv [port_uuid, zone, ...] (even length). -->
     <method name="Clear">
-      <arg type="as" name="ip_address_list" direction="in"/>
+      <arg type="as" name="ips_or_zones_on_host" direction="in"/>
     </method>
   </interface>
 </node>
