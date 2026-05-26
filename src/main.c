@@ -23,12 +23,22 @@
  * capability.
  *
  * Usage:
- *  - SAVE mode: DBUS_SESSION_BUS_ADDRESS=<dbus address> conntrack_migrator 2 <dbus_helper_id> <num_ip_addresses> <space separated ip address list>
- *  - LOAD mode: DBUS_SESSION_BUS_ADDRESS=<dbus address> conntrack_migrator 1 <dbus_helper_id>
+ *  Two CLI shapes are supported. The legacy IP-based form is preserved as-is
+ *  so existing callers keep working; the new port/CT-zone form is selected
+ *  automatically based on the ratio of trailing args to the declared count.
  *
- *  eg:
- *  - SAVE mode: DBUS_SESSION_BUS_ADDRESS=unix:abstract=/abc,guid=def conntrack_migrator 2 helper1 2 1.1.1.1 2.2.2.2
- *  - LOAD mode: DBUS_SESSION_BUS_ADDRESS=unix:abstract=/abc,guid=def conntrack_migrator 1 helper1
+ *  Legacy IP-based:
+ *    - SAVE mode: DBUS_SYSTEM_BUS_ADDRESS=<addr> conntrack_migrator 2 \
+ *            <helper_id> <num_ips> <ip1> <ip2> ...
+ *    - LOAD mode: DBUS_SYSTEM_BUS_ADDRESS=<addr> conntrack_migrator 1 <helper_id>
+ *
+ *  New port/CT-zone-based:
+ *    - SAVE mode: DBUS_SYSTEM_BUS_ADDRESS=<addr> conntrack_migrator 2 \
+ *            <helper_id> <N> <port_uuid_1> <old_ct_zone_1> ... \
+ *                              <port_uuid_N> <old_ct_zone_N>
+ *    - LOAD mode: DBUS_SYSTEM_BUS_ADDRESS=<addr> conntrack_migrator 1 \
+ *            <helper_id> <N> <port_uuid_1> <old_ct_zone_1> <new_ct_zone_1> \
+ *                          ... <port_uuid_N> <old_ct_zone_N> <new_ct_zone_N>
  */
 
 #define _GNU_SOURCE
@@ -36,6 +46,7 @@
 #include <err.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -55,12 +66,57 @@
 #include "lmct_config.h"
 #include "log.h"
 
-#define MODE_ARG_INDEX 1
-#define HELPER_ID_ARG_INDEX 2
-#define NUM_IP_ADDR_ARG_INDEX 3
-#define IP_ADDR_LIST_ARG_INDEX 4
+#define MODE_ARG_INDEX                  1
+#define HELPER_ID_ARG_INDEX             2
 
-#define MAX_IP_ADDRESSES_SUPPORTED 127
+/* Legacy (IP-mode) names kept for backward compat with existing code. */
+#define NUM_IP_ADDR_ARG_INDEX           3
+#define IP_ADDR_LIST_ARG_INDEX          4
+
+/* Generic names that read cleanly for both IP and port-zone layouts. */
+#define NUM_ENTRIES_ARG_INDEX           3
+#define ENTRIES_LIST_START_ARG_INDEX    4
+
+/* Per-entry argv stride for the new (port_uuid, ct_zone[, new_ct_zone]) layout. */
+#define SAVE_PORT_ZONE_STRIDE           2   /* <port_uuid> <old_ct_zone> */
+#define LOAD_PORT_ZONE_STRIDE           3   /* <port_uuid> <old_ct_zone> <new_ct_zone> */
+
+/* Canonical UUID hex string length: 8-4-4-4-12 = 36 chars. */
+#define UUID_STRING_LEN                 36
+
+#define MAX_IP_ADDRESSES_SUPPORTED      127
+
+/**
+ * Sub-mode tag: tells the rest of the daemon which SAVE-mode CLI layout
+ * was detected from argv.
+ */
+enum save_input_kind {
+    SAVE_INPUT_IPS,
+    SAVE_INPUT_PORT_ZONES
+};
+
+/**
+ * Sub-mode tag: tells the rest of the daemon which LOAD-mode CLI layout
+ * was detected from argv.
+ */
+enum load_input_kind {
+    LOAD_INPUT_LEGACY,
+    LOAD_INPUT_PORT_ZONES
+};
+
+/**
+ * Result of CLI parsing - filled by check_args() and consumed by main().
+ *
+ * The sub-kind field is a tagged union: the active arm is determined by
+ * @mode (SAVE_MODE -> save_kind, LOAD_MODE -> load_kind).
+ */
+struct parsed_cli {
+    enum op_mode mode;
+    union {
+        enum save_input_kind save_kind;
+        enum load_input_kind load_kind;
+    };
+};
 
 const char *lmct_config_path = "/etc/lmct_config";
 
@@ -298,6 +354,61 @@ create_ips_ht_from_args(char *argv[])
 }
 
 /**
+ * Decides which SAVE-mode CLI layout we are looking at by comparing the
+ * number of trailing argv slots against the declared entry count N:
+ *
+ *   ratio = (argc - ENTRIES_LIST_START_ARG_INDEX) / N
+ *     ratio == 1 -> SAVE_INPUT_IPS         (one IP per entry)
+ *     ratio == 2 -> SAVE_INPUT_PORT_ZONES  (port_uuid + old_zone per entry)
+ *
+ * The "no list / N == 0" cases default to SAVE_INPUT_IPS so the existing
+ * "VM with no IPv4 NICs" passthrough in start_in_save_mode() stays intact.
+ *
+ * NOTE: this lives in the runtime (post-fork) section of the file, above
+ * dmain(), because dmain re-runs the detection after the double fork to
+ * recover the SAVE sub-kind without threading it through a new parameter.
+ * The pre-fork validator block below uses the same function for shape
+ * checking; we deliberately keep one definition shared by both call sites.
+ *
+ * Args:
+ *   @argc num of CLI arguments.
+ *   @argv array of CLI arguments.
+ *
+ * Returns:
+ *   The detected sub-mode. Aborts the process via errx() on a shape
+ *   mismatch (declared N is non-zero but trailing args fit neither layout).
+ */
+static enum save_input_kind
+detect_save_input_kind(int argc, char *argv[])
+{
+    int n;
+    int remaining;
+
+    if (argc <= ENTRIES_LIST_START_ARG_INDEX) {
+        return SAVE_INPUT_IPS;
+    }
+
+    n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+    if (n <= 0) {
+        return SAVE_INPUT_IPS;
+    }
+
+    remaining = argc - ENTRIES_LIST_START_ARG_INDEX;
+
+    if (remaining == n * 1) {
+        return SAVE_INPUT_IPS;
+    }
+    if (remaining == n * SAVE_PORT_ZONE_STRIDE) {
+        return SAVE_INPUT_PORT_ZONES;
+    }
+
+    errx(EXIT_FAILURE,
+         "SAVE mode: argv shape mismatch. N=%d, expected %d args (IP form) "
+         "or %d args (port-zone form), got %d.",
+         n, n * 1, n * SAVE_PORT_ZONE_STRIDE, remaining);
+}
+
+/**
  * Entry point for the daemon.
  *
  * Args:
@@ -316,10 +427,18 @@ dmain(int argc, char *argv[])
     int ret;
     bool stop_flag = false;
     struct dbus_targs dbus_server_args;
+    enum save_input_kind save_kind = SAVE_INPUT_IPS;
 
-    // Parse the command line argmuments.
+    // Parse the command line arguments.
     mode = atoi(argv[MODE_ARG_INDEX]);
     helper_id = argv[HELPER_ID_ARG_INDEX];
+
+    // Re-detect the SAVE sub-kind here because the parent's parsed_cli
+    // lived on a stack frame that is gone after the double fork. argv
+    // is preserved across forks, so detection is cheap and side-effect-free.
+    if (mode == SAVE_MODE) {
+        save_kind = detect_save_input_kind(argc, argv);
+    }
 
     // Initialise logging at default INFO level.
     ret = init_log(INFO, helper_id);
@@ -367,16 +486,24 @@ dmain(int argc, char *argv[])
 
     // Start save mode threads.
     if (mode == SAVE_MODE) {
-        GHashTable *ips_to_migrate;
-        ips_to_migrate = create_ips_ht_from_args(argv);
-        if (ips_to_migrate == NULL) {
-            return EINVAL;
-        }
+        if (save_kind == SAVE_INPUT_IPS) {
+            GHashTable *ips_to_migrate;
+            ips_to_migrate = create_ips_ht_from_args(argv);
+            if (ips_to_migrate == NULL) {
+                return EINVAL;
+            }
 
-        ret = start_in_save_mode(ips_to_migrate, &stop_flag);
-        g_hash_table_destroy(ips_to_migrate);
-        if (ret != 0) {
-            return EAGAIN;
+            ret = start_in_save_mode(ips_to_migrate, &stop_flag);
+            g_hash_table_destroy(ips_to_migrate);
+            if (ret != 0) {
+                return EAGAIN;
+            }
+        } else {
+            // PORT_ZONES SAVE path. Wired up in Step 2: it will build a
+            // (zones_to_migrate, ports_to_migrate) bundle from argv and
+            // hand it to a zone-aware start_in_save_mode().
+            LOG(INFO, "%s: PORT_ZONES SAVE path - "
+                "to be implemented in Step 2", __func__);
         }
     }
 
@@ -387,17 +514,155 @@ dmain(int argc, char *argv[])
     return 0;
 }
 
+/**
+ * Validates that @s is a canonical 8-4-4-4-12 hex UUID string.
+ *
+ * No version/variant bit checks - any 36-char hex-with-hyphens string
+ * is accepted. This is intentionally permissive: callers (e.g. libvirt)
+ * pass UUIDs in canonical form and we only need to reject obvious junk.
+ *
+ * Args:
+ *   @s nul-terminated candidate string. May be NULL.
+ *
+ * Returns:
+ *   true if the string is well-formed, false otherwise.
+ */
+static bool
+is_valid_uuid_string(const char *s)
+{
+    int i;
+
+    if (s == NULL || strlen(s) != UUID_STRING_LEN) {
+        return false;
+    }
+
+    for (i = 0; i < UUID_STRING_LEN; i++) {
+        char c = s[i];
+
+        if (i == 8 || i == 13 || i == 18 || i == 23) {
+            if (c != '-') {
+                return false;
+            }
+        } else {
+            bool is_hex = (c >= '0' && c <= '9') ||
+                          (c >= 'a' && c <= 'f') ||
+                          (c >= 'A' && c <= 'F');
+            if (!is_hex) {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
+/**
+ * Strict parser for a CT zone: must be a complete decimal uint16 with no
+ * trailing junk, no whitespace, no overflow.
+ *
+ * Uses the standard out-parameter pattern: @out is only written on success.
+ * On failure the caller's storage is left untouched.
+ *
+ * Args:
+ *   @s   nul-terminated decimal string.
+ *   @out output uint16_t (only written on success). Must be non-NULL.
+ *
+ * Returns:
+ *   true on success, false otherwise.
+ */
+static bool
+parse_ct_zone(const char *s, uint16_t *out)
+{
+    char *end = NULL;
+    unsigned long v;
+
+    if (s == NULL || *s == '\0' || out == NULL) {
+        return false;
+    }
+
+    errno = 0;
+    v = strtoul(s, &end, 10);
+    if (errno != 0 || end == s || *end != '\0' || v > UINT16_MAX) {
+        return false;
+    }
+
+    *out = (uint16_t) v;
+    return true;
+}
+
+/**
+ * Decides which LOAD-mode CLI layout we are looking at.
+ *
+ * Legacy LOAD is strictly: `conntrack_migrator 1 <helper_id>` (argc == 3).
+ * New LOAD is:             `conntrack_migrator 1 <helper_id> <N>
+ *                              <port_uuid> <old_ct_zone> <new_ct_zone> ...`
+ *                          (argc == 4 + 3*N).
+ *
+ * Anything else is a hard error - we deliberately do NOT silently fall back
+ * to legacy if the trailing args do not match the new shape.
+ *
+ * Args:
+ *   @argc num of CLI arguments.
+ *   @argv array of CLI arguments.
+ *
+ * Returns:
+ *   The detected sub-mode. Aborts the process via errx() on any mismatch.
+ */
+static enum load_input_kind
+detect_load_input_kind(int argc, char *argv[])
+{
+    int n;
+    int remaining;
+
+    if (argc == HELPER_ID_ARG_INDEX + 1) {   /* argc == 3: legacy LOAD */
+        return LOAD_INPUT_LEGACY;
+    }
+
+    if (argc <= ENTRIES_LIST_START_ARG_INDEX) {
+        errx(EXIT_FAILURE,
+             "LOAD mode: trailing args present but no port-zone list. "
+             "Expected `conntrack_migrator 1 <helper_id>` or "
+             "`conntrack_migrator 1 <helper_id> <N> "
+             "<port_uuid> <old_zone> <new_zone> ...`.");
+    }
+
+    n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+    if (n <= 0) {
+        errx(EXIT_FAILURE,
+             "LOAD mode: invalid number of port-zone entries: '%s' "
+             "(must be a positive integer).",
+             argv[NUM_ENTRIES_ARG_INDEX]);
+    }
+
+    remaining = argc - ENTRIES_LIST_START_ARG_INDEX;
+
+    if (remaining == n * LOAD_PORT_ZONE_STRIDE) {
+        return LOAD_INPUT_PORT_ZONES;
+    }
+
+    errx(EXIT_FAILURE,
+         "LOAD mode: argv shape mismatch. N=%d, expected %d args "
+         "(port-zone form), got %d.",
+         n, n * LOAD_PORT_ZONE_STRIDE, remaining);
+}
+
 static void
 err_usage(void)
 {
     errx(EXIT_FAILURE,
         "Usage:\n"
-        "SAVE mode: DBUS_SYSTEM_BUS_ADDRESS=<dbus address> "
-        "conntrack_migrator 2 <dbus_helper_id> <num_ip_addresses> "
-        "<space separated ip address list>\n"
-        "LOAD mode: DBUS_SYSTEM_BUS_ADDRESS=<dbus address> "
-        "conntrack_migrator 1 <dbus_helper_id>\n"
-        "NOTE: DBUS_SYSTEM_BUS_ADDRESS env variable should be set.\n");
+        "  Legacy IP-based:\n"
+        "    SAVE mode: DBUS_SYSTEM_BUS_ADDRESS=<addr> conntrack_migrator 2 "
+            "<helper_id> <num_ips> <ip1> <ip2> ...\n"
+        "    LOAD mode: DBUS_SYSTEM_BUS_ADDRESS=<addr> conntrack_migrator 1 "
+            "<helper_id>\n"
+        "  Port/CT-zone-based:\n"
+        "    SAVE mode: DBUS_SYSTEM_BUS_ADDRESS=<addr> conntrack_migrator 2 "
+            "<helper_id> <N> <port_uuid_1> <old_ct_zone_1> ... "
+            "<port_uuid_N> <old_ct_zone_N>\n"
+        "    LOAD mode: DBUS_SYSTEM_BUS_ADDRESS=<addr> conntrack_migrator 1 "
+            "<helper_id> <N> <port_uuid_1> <old_ct_zone_1> <new_ct_zone_1> "
+            "... <port_uuid_N> <old_ct_zone_N> <new_ct_zone_N>\n"
+        "NOTE: DBUS_SYSTEM_BUS_ADDRESS env variable must be set.\n");
 }
 
 /**
@@ -429,23 +694,22 @@ check_dbus_address_env(void)
 }
 
 /**
- * Performs checks on args when started in save mode.
+ * Performs checks on args when started in save mode (legacy IP form).
  *
  * Checks performed:
- * 1. Num of ip address param is present and is non-negative
- * 2. The ip address list size is num of ip address provided
- * 3. Number of ip addresses does not exceed 127 which is the limit set by
- *    netlink bsd filters.
+ * 1. Num of ip address param is present and is non-negative.
+ * 2. The ip address list size matches the num of ip addresses provided.
+ *
+ * NOTE: this is the legacy SAVE validator, kept verbatim from the original
+ * implementation. The 127-IP cap referenced in the original docstring is
+ * enforced later in start_in_save_mode().
  *
  * Args:
- *   @argc num of arguemnts
+ *   @argc num of arguments.
  *   @argv array of CLI arguments.
- *
- * Returns:
- *   true if success, false otherwise.
  */
 static void
-check_save_mode_args(int argc, char *argv[])
+check_ip_save_args(int argc, char *argv[])
 {
     int num_ip_addr;
 
@@ -460,19 +724,177 @@ check_save_mode_args(int argc, char *argv[])
 }
 
 /**
- * Performs checks on CLI args.
+ * Per-entry content checks for the new SAVE port-zone layout.
  *
- * Checks performed:
- * 1. Mode is vaild
- * 2. DBUS_SYSTEM_BUS_ADDRESS env is set
- * 3. SAVE mode has proper arguments
+ * Arity (argc vs declared N) is guaranteed by detect_save_input_kind()
+ * before we get here, so we only validate the *content* of each entry:
+ *  - port_uuid is a canonical 8-4-4-4-12 hex UUID,
+ *  - old_ct_zone parses cleanly as uint16.
+ *
+ * Aborts the process via errx() on the first malformed entry.
  *
  * Args:
- *   @argc num of arguemnts
+ *   @argc num of arguments (used only for an arity sanity check).
  *   @argv array of CLI arguments.
  */
 static void
-check_args(int argc, char *argv[])
+check_zone_save_args(int argc, char *argv[])
+{
+    int n;
+    int i;
+
+    (void) argc;   /* arity already checked by the detector */
+
+    n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+
+    for (i = 0; i < n; i++) {
+        int base = ENTRIES_LIST_START_ARG_INDEX + (i * SAVE_PORT_ZONE_STRIDE);
+        const char *port_uuid = argv[base];
+        const char *zone_str  = argv[base + 1];
+        uint16_t zone_val;
+
+        if (!is_valid_uuid_string(port_uuid)) {
+            errx(EXIT_FAILURE,
+                 "Invalid UUID at port-zone entry %d: '%s'",
+                 i, port_uuid);
+        }
+        if (!parse_ct_zone(zone_str, &zone_val)) {
+            errx(EXIT_FAILURE,
+                 "Invalid old_ct_zone at port-zone entry %d: '%s' "
+                 "(must be uint16)", i, zone_str);
+        }
+    }
+}
+
+/**
+ * Per-entry content checks for the new LOAD port-zone layout.
+ *
+ * Arity is guaranteed by detect_load_input_kind(); we only validate the
+ * content of each (port_uuid, old_ct_zone, new_ct_zone) triple.
+ *
+ * Args:
+ *   @argc num of arguments (used only for an arity sanity check).
+ *   @argv array of CLI arguments.
+ */
+static void
+check_zone_load_args(int argc, char *argv[])
+{
+    int n;
+    int i;
+
+    (void) argc;
+
+    n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+
+    for (i = 0; i < n; i++) {
+        int base = ENTRIES_LIST_START_ARG_INDEX + (i * LOAD_PORT_ZONE_STRIDE);
+        const char *port_uuid    = argv[base];
+        const char *old_zone_str = argv[base + 1];
+        const char *new_zone_str = argv[base + 2];
+        uint16_t z;
+
+        if (!is_valid_uuid_string(port_uuid)) {
+            errx(EXIT_FAILURE,
+                 "Invalid UUID at port-zone entry %d: '%s'",
+                 i, port_uuid);
+        }
+        if (!parse_ct_zone(old_zone_str, &z)) {
+            errx(EXIT_FAILURE,
+                 "Invalid old_ct_zone at port-zone entry %d: '%s'",
+                 i, old_zone_str);
+        }
+        if (!parse_ct_zone(new_zone_str, &z)) {
+            errx(EXIT_FAILURE,
+                 "Invalid new_ct_zone at port-zone entry %d: '%s'",
+                 i, new_zone_str);
+        }
+    }
+}
+
+/**
+ * Top-level SAVE-mode arg dispatcher.
+ *
+ * Picks IP vs port-zone via detect_save_input_kind() and delegates
+ * per-entry validation to the appropriate validator. Reports the
+ * detected sub-kind to the caller via @out_kind.
+ *
+ * Args:
+ *   @argc     num of arguments.
+ *   @argv     array of CLI arguments.
+ *   @out_kind output pointer for the detected sub-kind. May be NULL.
+ */
+static void
+check_save_mode_args(int argc, char *argv[],
+                     enum save_input_kind *out_kind)
+{
+    enum save_input_kind kind = detect_save_input_kind(argc, argv);
+
+    if (kind == SAVE_INPUT_IPS) {
+        check_ip_save_args(argc, argv);
+    } else {
+        if(kind == SAVE_INPUT_PORT_ZONES) {
+            check_zone_save_args(argc, argv);
+        } else {
+            errx(EXIT_FAILURE, "Invalid save input kind: %d", kind);
+        }
+    }
+
+    if (out_kind != NULL) {
+        *out_kind = kind;
+    }
+}
+
+/**
+ * Top-level LOAD-mode arg dispatcher.
+ *
+ * Legacy LOAD takes no extra args beyond <mode> <helper_id>; the new LOAD
+ * port-zone layout is content-validated. Reports the detected sub-kind
+ * to the caller via @out_kind.
+ *
+ * Args:
+ *   @argc     num of arguments.
+ *   @argv     array of CLI arguments.
+ *   @out_kind output pointer for the detected sub-kind. May be NULL.
+ */
+static void
+check_load_mode_args(int argc, char *argv[],
+                     enum load_input_kind *out_kind)
+{
+    enum load_input_kind kind = detect_load_input_kind(argc, argv);
+
+    if (kind == LOAD_INPUT_PORT_ZONES) {
+        check_zone_load_args(argc, argv);
+    }else{
+        if(kind != LOAD_INPUT_LEGACY) {
+            errx(EXIT_FAILURE, "Invalid load input kind: %d", kind);
+        }
+    }
+
+    if (out_kind != NULL) {
+        *out_kind = kind;
+    }
+}
+
+/**
+ * Top-level CLI validation entry point.
+ *
+ * Checks performed:
+ * 1. Minimum argc.
+ * 2. DBUS_SYSTEM_BUS_ADDRESS env is set.
+ * 3. Mode is valid (LOAD/SAVE).
+ * 4. Per-mode argument shape and per-entry content (legacy IP form or
+ *    new port-zone form, auto-detected from argv).
+ *
+ * On success populates @out with the validated (mode, sub-kind) pair.
+ * On any failure errx() exits the process.
+ *
+ * Args:
+ *   @argc num of arguments.
+ *   @argv array of CLI arguments.
+ *   @out  output struct populated with the parse result. Must be non-NULL.
+ */
+static void
+check_args(int argc, char *argv[], struct parsed_cli *out)
 {
     int mode;
 
@@ -484,9 +906,12 @@ check_args(int argc, char *argv[])
 
     mode = atoi(argv[MODE_ARG_INDEX]);
     check_mode(mode);
+    out->mode = (enum op_mode) mode;
 
     if (mode == SAVE_MODE) {
-        check_save_mode_args(argc, argv);
+        check_save_mode_args(argc, argv, &out->save_kind);
+    } else {
+        check_load_mode_args(argc, argv, &out->load_kind);
     }
 }
 
@@ -517,9 +942,12 @@ int
 main(int argc, char *argv[])
 {
     int child_pid;
+    struct parsed_cli cli = {0};
 
-    // Perform prechecks on the arguments
-    check_args(argc, argv);
+    // Validate CLI args + decide IP-vs-zone sub-kind before any forks.
+    // The result is recomputed inside dmain() because the parent's stack
+    // (and thus this `cli`) is gone by the time the grandchild runs.
+    check_args(argc, argv, &cli);
 
     // Fork child
     child_pid = fork();
@@ -529,7 +957,7 @@ main(int argc, char *argv[])
     if (child_pid == 0) {
         // Become a process group and session group leader
         setsid();
-
+        
         // Fork granchild so that session leader can exit
         int grandchild_pid = fork();
         if (grandchild_pid < 0) {
