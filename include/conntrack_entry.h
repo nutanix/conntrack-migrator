@@ -18,6 +18,7 @@
 #include <stdint.h>
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 
+#include "common.h"
 #include "log.h"
 
 // Size of unsigned 32-bit integer
@@ -39,7 +40,7 @@
 #define CT_LABEL_NUM_WORDS 4
 
 // Total num of attributes we are using from nf_conntrack
-#define CT_ENTRY_NUM_ATTRIBUTES 21
+#define CT_ENTRY_NUM_ATTRIBUTES 25
 
 // Number of bits per byte
 #define BITS_PER_BYTE 8
@@ -72,6 +73,10 @@ enum conntrack_entry_attribute {
     CT_ATTR_MARK,                    // [uint32_t] CT mark metadata
     CT_ATTR_STATUS,                  // [uint32_t] CT status.(REPLIED/CONFIRMED/ASSURED..)
     CT_ATTR_LABEL,                   // [uint32_t[4]] CT label. 128 bits
+    CT_ATTR_L3_SRC_V4_REPL,          // [uint32_t] reply source ip address
+    CT_ATTR_L3_DST_V4_REPL,          // [uint32_t] reply destination ip address
+    CT_ATTR_L4_SRC_PORT_REPL,        // [uint16_t] reply source port
+    CT_ATTR_L4_DST_PORT_REPL,        // [uint16_t] reply destination port
     CT_ATTR_MAX                      // Attributes list end
 };
 
@@ -103,11 +108,12 @@ void
 conntrack_entry_destroy_g_wrapper(void *);
 
 struct conntrack_entry *
-conntrack_entry_from_nf_conntrack(struct nf_conntrack *);
+conntrack_entry_from_nf_conntrack(struct nf_conntrack *, enum save_input_kind);
 
 struct conntrack_entry *
 get_conntrack_entry_from_update(struct conntrack_entry *,
-                                struct nf_conntrack *);
+                                struct nf_conntrack *,
+                                enum save_input_kind);
 
 bool
 is_set_in_bitmap(uint32_t *, uint8_t);

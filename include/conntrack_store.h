@@ -20,6 +20,8 @@
 
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 
+#include "common.h"
+
 /**
  * Represents the hashtable to store the conntrack entries received from the
  * kernel.
@@ -39,6 +41,6 @@ conntrack_store_destroy(struct conntrack_store *);
 
 void
 update_conntrack_store(struct conntrack_store *, struct nf_conntrack *,
-                       enum nf_conntrack_msg_type);
+                       enum nf_conntrack_msg_type, enum save_input_kind);
 
 #endif /* CONNTRACK_STORE_H */

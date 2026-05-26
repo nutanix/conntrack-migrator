@@ -81,28 +81,7 @@
 #define SAVE_PORT_ZONE_STRIDE           2   /* <port_uuid> <old_ct_zone> */
 #define LOAD_PORT_ZONE_STRIDE           3   /* <port_uuid> <old_ct_zone> <new_ct_zone> */
 
-/* Canonical UUID hex string length: 8-4-4-4-12 = 36 chars. */
-#define UUID_STRING_LEN                 36
-
 #define MAX_IP_ADDRESSES_SUPPORTED      127
-
-/**
- * Sub-mode tag: tells the rest of the daemon which SAVE-mode CLI layout
- * was detected from argv.
- */
-enum save_input_kind {
-    SAVE_INPUT_IPS,
-    SAVE_INPUT_PORT_ZONES
-};
-
-/**
- * Sub-mode tag: tells the rest of the daemon which LOAD-mode CLI layout
- * was detected from argv.
- */
-enum load_input_kind {
-    LOAD_INPUT_LEGACY,
-    LOAD_INPUT_PORT_ZONES
-};
 
 /**
  * Result of CLI parsing - filled by check_args() and consumed by main().
@@ -170,7 +149,7 @@ pthread_wrapper_ct_events(void *data)
         return NULL;
     }
 
-    listen_for_conntrack_events(nl, targs->ips_to_migrate,
+    listen_for_conntrack_events(nl, targs->targets,
                                 targs->is_src, targs->stop_flag);
     mnl_socket_close(nl);
 
@@ -181,14 +160,15 @@ pthread_wrapper_ct_events(void *data)
 }
 
 /**
- * Gets all the entries present in the kernel CT table for the given IP
- * addresses.
+ * Gets all the entries present in the kernel CT table for the given
+ * SAVE migration targets.
  *
  * Args:
- *   @ips_to_migrate IP addresses used to filter the required CT entries.
+ *   @targets SAVE targets bundle (mode-aware) used to filter the required
+ *            CT entries.
  */
 static void
-dump_conntrack(GHashTable *ips_to_migrate)
+dump_conntrack(struct save_targets *targets)
 {
     struct nfct_handle *handle;
 
@@ -199,7 +179,7 @@ dump_conntrack(GHashTable *ips_to_migrate)
         LOG(ERROR, "%s: nfct_open failed. %s", __func__, strerror(errno));
         return;
     }
-    get_conntrack_dump(handle, ips_to_migrate);
+    get_conntrack_dump(handle, targets);
     nfct_close(handle);
 }
 
@@ -207,123 +187,177 @@ dump_conntrack(GHashTable *ips_to_migrate)
  * Start threads required for save mode of operation.
  *
  * Following things are performed in the save mode:
- * 1. Conntrack delete thread is started which waits till Clear IPC is called.
- * 2. Conntrack events threads are started to filter events for the IP
- *    addresses present in the ips_to_migrate. If any update is received for a
- *    non-exisitent entry, it is treated as NEW since it contains the base five
- *    tuple information required to identify flow. Similarly, if a destroy
- *    event is received for a non-existent entry, it is ignored.
+ * 1. (IP mode only) Conntrack delete thread is started which waits till
+ *    Clear IPC is called.
+ * 2. Conntrack events threads are started to filter events for the
+ *    migration targets. In IP mode this is two BPF-filtered threads
+ *    (one src, one dst). In zone mode BPF can't filter on CT zone, so a
+ *    single unfiltered thread is started and the callback does the zone
+ *    match in-process.
+ *    If any update is received for a non-exisitent entry, it is treated
+ *    as NEW since it contains the base five tuple information required to
+ *    identify flow. Similarly, if a destroy event is received for a
+ *    non-existent entry, it is ignored.
  * 3. Finally, Conntrack dump is taken from the kernel to get all the live
  *    flows in the system.
  *
  * The above workflow is used to maintain a local copy of the CT entries for
  * the VM.
  *
+ * NOTE: zone-mode cleanup (Clear/delete) is deferred to Step 3; the zone
+ * branch deliberately does not start the delete thread.
+ *
  * Args:
- *   @ips_to_migrate Hashtable of IP addresses for which CT entries
- *                   have to be migrated.
+ *   @targets SAVE targets bundle (mode-aware) for which CT entries have
+ *            to be migrated.
  *   @stop_flag flag used by thread to exit after dbus operations.
  *
  * Returns:
  *   0 in case of success, -1 otherwise
  */
 static int
-start_in_save_mode(GHashTable *ips_to_migrate, bool *stop_flag)
+start_in_save_mode(struct save_targets *targets, bool *stop_flag)
 {
     int ret;
-    uint32_t num_ips;
-    struct ct_events_targs *src_targs, *dst_targs;
+    struct ct_events_targs *src_targs, *dst_targs, *zone_targs;
 
-    // Start the delete thread.
-    // NOTE: ct_del_args is an extern global variable
-    ct_del_args.ips_migrated = ips_to_migrate;
+    if (targets->kind == SAVE_INPUT_IPS) {
+        uint32_t num_ips;
 
-    num_ips = g_hash_table_size(ips_to_migrate);
+        // Start the delete thread.
+        // NOTE: ct_del_args is an extern global variable
+        ct_del_args.ips_migrated = targets->ips_to_migrate;
 
-    // This happens in case a VM has no IPv4 NICs attached to it. Thus, the VM
-    // will not have any CT entries present in kernel to migrate. Also, since
-    // QEMU expects helper process to be present during migration, we do not
-    // exit the process completely rather just runs the dbus server to
-    // facilitate the IPC calls.
-    if (num_ips == 0) {
-        LOG(INFO, "%s: Not starting any save mode threads since number of IP "
-            "addresses is 0", __func__);
+        num_ips = g_hash_table_size(targets->ips_to_migrate);
+
+        // This happens in case a VM has no IPv4 NICs attached to it. Thus,
+        // the VM will not have any CT entries present in kernel to migrate.
+        // Also, since QEMU expects helper process to be present during
+        // migration, we do not exit the process completely rather just runs
+        // the dbus server to facilitate the IPC calls.
+        if (num_ips == 0) {
+            LOG(INFO, "%s: Not starting any save mode threads since number "
+                "of IP addresses is 0", __func__);
+            return 0;
+        }
+
+        if (num_ips > MAX_IP_ADDRESSES_SUPPORTED) {
+            LOG(WARNING, "Number of IP addresses exceeds the max limit: %d. "
+                "No Conntrack Migration will be performed.",
+                MAX_IP_ADDRESSES_SUPPORTED);
+            return 0;
+        }
+
+        // Conntrack delete thread.
+        ret = pthread_create(&ct_del_args.tid, NULL,
+                             &delete_ct_entries,
+                             (void *)&ct_del_args);
+        if (ret != 0) {
+            LOG(ERROR, "%s: CT delete thread creation failed. %s", __func__,
+                strerror(ret));
+            return -1;
+        }
+        ret = pthread_setname_np(ct_del_args.tid, "ct_delete");
+        if (ret != 0) {
+            LOG(WARNING, "%s: Failed to set thread name \"ct_delete\": %s",
+                __func__, strerror(ret));
+        }
+
+        // Listen for conntrack events which contains their src IP address
+        // in ips_to_migrate.
+        src_targs = g_malloc0(sizeof(struct ct_events_targs));
+        src_targs->targets = targets;
+        src_targs->stop_flag = stop_flag;
+        src_targs->is_src = true;
+        ret = pthread_create(&src_targs->tid, NULL, &pthread_wrapper_ct_events,
+                             (void *)src_targs);
+        if (ret != 0) {
+            LOG(ERROR, "%s: src events thread creation failed. %s", __func__,
+                strerror(ret));
+            return -1;
+        }
+        ret = pthread_setname_np(src_targs->tid, "ct_events_src");
+        if (ret != 0) {
+            LOG(WARNING, "%s: Failed to set thread name \"ct_events_src\". %s",
+                __func__, strerror(ret));
+        }
+
+        // Listen for conntrack events which contains their dst IP address
+        // in ips_to_migrate.
+        dst_targs = g_malloc0(sizeof(struct ct_events_targs));
+        dst_targs->targets = targets;
+        dst_targs->stop_flag = stop_flag;
+        dst_targs->is_src = false;
+        ret = pthread_create(&dst_targs->tid, NULL,
+                             &pthread_wrapper_ct_events,
+                             (void *)dst_targs);
+        if (ret != 0) {
+            LOG(ERROR, "%s: dst events thread creation failed. %s", __func__,
+                strerror(ret));
+            return -1;
+        }
+        ret = pthread_setname_np(dst_targs->tid, "ct_events_dst");
+        if (ret != 0) {
+            LOG(WARNING, "%s: Failed to set thread name \"ct_events_dst\". %s",
+                __func__, strerror(ret));
+        }
+
+        // Get all the conntrack entries for the given ip address.
+        dump_conntrack(targets);
+
+        // Wait for all the threads to be stopped.
+        pthread_join(src_targs->tid, NULL);
+        pthread_join(dst_targs->tid, NULL);
+        pthread_join(ct_del_args.tid, NULL);
+
+        g_free(src_targs);
+        g_free(dst_targs);
+
         return 0;
     }
 
-    if (num_ips > MAX_IP_ADDRESSES_SUPPORTED) {
-        LOG(WARNING, "Number of IP addresses exceeds the max limit: %d. "
-            "No Conntrack Migration will be performed.",
-            MAX_IP_ADDRESSES_SUPPORTED);
+    /* SAVE_INPUT_PORT_ZONES */
+    {
+        uint32_t num_zones = g_hash_table_size(targets->zones_to_migrate);
+
+        if (num_zones == 0) {
+            LOG(INFO, "%s: Not starting any save mode threads since number "
+                "of zones is 0", __func__);
+            return 0;
+        }
+
+        // BPF can't filter on CT zone, so we don't split src/dst threads.
+        // One unfiltered events thread is enough; the callback does the
+        // zone match in-process.
+        zone_targs = g_malloc0(sizeof(struct ct_events_targs));
+        zone_targs->targets = targets;
+        zone_targs->stop_flag = stop_flag;
+        zone_targs->is_src = false;   /* unused in zone mode */
+        ret = pthread_create(&zone_targs->tid, NULL,
+                             &pthread_wrapper_ct_events,
+                             (void *)zone_targs);
+        if (ret != 0) {
+            LOG(ERROR, "%s: zone events thread creation failed. %s", __func__,
+                strerror(ret));
+            return -1;
+        }
+        ret = pthread_setname_np(zone_targs->tid, "ct_events_zone");
+        if (ret != 0) {
+            LOG(WARNING, "%s: Failed to set thread name \"ct_events_zone\". "
+                "%s", __func__, strerror(ret));
+        }
+
+        // Get all the conntrack entries for the given zones.
+        dump_conntrack(targets);
+
+        // Wait for the events thread to be stopped. Zone-mode cleanup
+        // (Clear/delete) is deferred to Step 3; no delete thread to join.
+        pthread_join(zone_targs->tid, NULL);
+
+        g_free(zone_targs);
+
         return 0;
     }
-
-    // Conntrack delete thread.
-    ret = pthread_create(&ct_del_args.tid, NULL,
-                         &delete_ct_entries,
-                         (void *)&ct_del_args);
-    if (ret != 0) {
-        LOG(ERROR, "%s: CT delete thread creation failed. %s", __func__,
-            strerror(ret));
-        return -1;
-    }
-    ret = pthread_setname_np(ct_del_args.tid, "ct_delete");
-    if (ret != 0) {
-        LOG(WARNING, "%s: Failed to set thread name \"ct_delete\": %s",
-            __func__, strerror(ret));
-    }
-
-    // Listen for conntrack events which contains their src IP address
-    // in ips_to_migrate.
-    src_targs = g_malloc0(sizeof(struct ct_events_targs));
-    src_targs->ips_to_migrate = ips_to_migrate;
-    src_targs->stop_flag = stop_flag;
-    src_targs->is_src = true;
-    ret = pthread_create(&src_targs->tid, NULL, &pthread_wrapper_ct_events,
-                         (void *)src_targs);
-    if (ret != 0) {
-        LOG(ERROR, "%s: src events thread creation failed. %s", __func__,
-            strerror(ret));
-        return -1;
-    }
-    ret = pthread_setname_np(src_targs->tid, "ct_events_src");
-    if (ret != 0) {
-        LOG(WARNING, "%s: Failed to set thread name \"ct_events_src\". %s",
-            __func__, strerror(ret));
-    }
-
-    // Listen for conntrack events which contains their dst IP address
-    // in ips_to_migrate.
-    dst_targs = g_malloc0(sizeof(struct ct_events_targs));
-    dst_targs->ips_to_migrate = ips_to_migrate;
-    dst_targs->stop_flag = stop_flag;
-    dst_targs->is_src = false;
-    ret = pthread_create(&dst_targs->tid, NULL,
-                         &pthread_wrapper_ct_events,
-                         (void *)dst_targs);
-    if (ret != 0) {
-        LOG(ERROR, "%s: dst events thread creation failed. %s", __func__,
-            strerror(ret));
-        return -1;
-    }
-    ret = pthread_setname_np(dst_targs->tid, "ct_events_dst");
-    if (ret != 0) {
-        LOG(WARNING, "%s: Failed to set thread name \"ct_events_dst\". %s",
-            __func__, strerror(ret));
-    }
-
-    // Get all the conntrack entries for the given ip address.
-    dump_conntrack(ips_to_migrate);
-
-    // Wait for all the threads to be stopped.
-    pthread_join(src_targs->tid, NULL);
-    pthread_join(dst_targs->tid, NULL);
-    pthread_join(ct_del_args.tid, NULL);
-
-    g_free(src_targs);
-    g_free(dst_targs);
-
-    return 0;
 }
 
 /**
@@ -350,6 +384,52 @@ create_ips_ht_from_args(char *argv[])
         return NULL;
     }
 
+    return ht;
+}
+
+/**
+ * Creates the (zones_to_migrate, ports_to_migrate) hashtable pair from the
+ * SAVE port-zone CLI arguments.
+ *
+ * Walks argv at the SAVE_PORT_ZONE_STRIDE-strided offsets, splits out the
+ * port_uuid and old_ct_zone columns, and hands the parallel arrays to
+ * create_hashtable_from_zone_and_port_list().
+ *
+ * Args:
+ *   @argv      array of CLI args.
+ *   @out_ports output: ports_to_migrate hashtable.
+ *
+ * Returns:
+ *   zones_to_migrate hashtable on success, NULL on failure (in which case
+ *   *out_ports is left set to NULL).
+ */
+static GHashTable *
+create_zones_and_port_ht_from_args(char *argv[], GHashTable **out_ports)
+{
+    int n_entries;
+    int i;
+    const char **zones;
+    const char **port_uuids;
+    GHashTable *ht;
+
+    n_entries = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+    zones = g_malloc0(sizeof(*zones) * n_entries);
+    port_uuids = g_malloc0(sizeof(*port_uuids) * n_entries);
+    for (i = 0; i < n_entries; i++) {
+        int base = ENTRIES_LIST_START_ARG_INDEX + (i * SAVE_PORT_ZONE_STRIDE);
+        port_uuids[i] = argv[base];
+        zones[i] = argv[base + 1];
+    }
+
+    ht = create_hashtable_from_zone_and_port_list(zones, port_uuids,
+                                                  n_entries, out_ports);
+    g_free(zones);
+    g_free(port_uuids);
+
+    if (ht == NULL) {
+        LOG(ERROR, "%s: Hashtable creation failed.", __func__);
+        return NULL;
+    }
     return ht;
 }
 
@@ -486,24 +566,30 @@ dmain(int argc, char *argv[])
 
     // Start save mode threads.
     if (mode == SAVE_MODE) {
+        struct save_targets *targets;
+
         if (save_kind == SAVE_INPUT_IPS) {
             GHashTable *ips_to_migrate;
             ips_to_migrate = create_ips_ht_from_args(argv);
             if (ips_to_migrate == NULL) {
                 return EINVAL;
             }
-
-            ret = start_in_save_mode(ips_to_migrate, &stop_flag);
-            g_hash_table_destroy(ips_to_migrate);
-            if (ret != 0) {
-                return EAGAIN;
-            }
+            targets = save_targets_new_from_ips(ips_to_migrate);
         } else {
-            // PORT_ZONES SAVE path. Wired up in Step 2: it will build a
-            // (zones_to_migrate, ports_to_migrate) bundle from argv and
-            // hand it to a zone-aware start_in_save_mode().
-            LOG(INFO, "%s: PORT_ZONES SAVE path - "
-                "to be implemented in Step 2", __func__);
+            GHashTable *zones_ht = NULL;
+            GHashTable *ports_ht = NULL;
+            zones_ht = create_zones_and_port_ht_from_args(argv, &ports_ht);
+            if (zones_ht == NULL) {
+                return EINVAL;
+            }
+            targets = save_targets_new_from_zones_and_ports(zones_ht,
+                                                            ports_ht);
+        }
+
+        ret = start_in_save_mode(targets, &stop_flag);
+        save_targets_destroy(targets);
+        if (ret != 0) {
+            return EAGAIN;
         }
     }
 
@@ -512,81 +598,6 @@ dmain(int argc, char *argv[])
     close_log();
 
     return 0;
-}
-
-/**
- * Validates that @s is a canonical 8-4-4-4-12 hex UUID string.
- *
- * No version/variant bit checks - any 36-char hex-with-hyphens string
- * is accepted. This is intentionally permissive: callers (e.g. libvirt)
- * pass UUIDs in canonical form and we only need to reject obvious junk.
- *
- * Args:
- *   @s nul-terminated candidate string. May be NULL.
- *
- * Returns:
- *   true if the string is well-formed, false otherwise.
- */
-static bool
-is_valid_uuid_string(const char *s)
-{
-    int i;
-
-    if (s == NULL || strlen(s) != UUID_STRING_LEN) {
-        return false;
-    }
-
-    for (i = 0; i < UUID_STRING_LEN; i++) {
-        char c = s[i];
-
-        if (i == 8 || i == 13 || i == 18 || i == 23) {
-            if (c != '-') {
-                return false;
-            }
-        } else {
-            bool is_hex = (c >= '0' && c <= '9') ||
-                          (c >= 'a' && c <= 'f') ||
-                          (c >= 'A' && c <= 'F');
-            if (!is_hex) {
-                return false;
-            }
-        }
-    }
-    return true;
-}
-
-/**
- * Strict parser for a CT zone: must be a complete decimal uint16 with no
- * trailing junk, no whitespace, no overflow.
- *
- * Uses the standard out-parameter pattern: @out is only written on success.
- * On failure the caller's storage is left untouched.
- *
- * Args:
- *   @s   nul-terminated decimal string.
- *   @out output uint16_t (only written on success). Must be non-NULL.
- *
- * Returns:
- *   true on success, false otherwise.
- */
-static bool
-parse_ct_zone(const char *s, uint16_t *out)
-{
-    char *end = NULL;
-    unsigned long v;
-
-    if (s == NULL || *s == '\0' || out == NULL) {
-        return false;
-    }
-
-    errno = 0;
-    v = strtoul(s, &end, 10);
-    if (errno != 0 || end == s || *end != '\0' || v > UINT16_MAX) {
-        return false;
-    }
-
-    *out = (uint16_t) v;
-    return true;
 }
 
 /**
