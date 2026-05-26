@@ -44,10 +44,25 @@ typedef int (*dump_cb)(enum nf_conntrack_msg_type type,
 /**
  * Structure to represent the callback arguments for the dump taken before
  * deleting the conntrack entries.
+ *
+ * Tagged union over the active SAVE sub-mode (same shape as ct_delete_args):
+ *   kind == SAVE_INPUT_IPS         -> ips_migrated / ips_on_host valid.
+ *   kind == SAVE_INPUT_PORT_ZONES  -> zones_migrated / zones_on_host valid.
+ *
+ * ct_store is the per-pass output: CT entries that survive the filter are
+ * stolen into it and later iterated for NFCT_Q_DESTROY.
  */
 struct delete_ct_dump_cb_args {
+    enum save_input_kind kind; // selects which set of pointers below is valid
+
+    /* IP mode */
     GHashTable *ips_migrated; // IPs for which CT entries have been migrated
     GHashTable *ips_on_host;  // IPs that are currently present on the host
+
+    /* Zone mode */
+    GHashTable *zones_migrated; // CT zones for which entries have been migrated
+    GHashTable *zones_on_host;  // CT zones currently owned by ports on this host
+
     GHashTable *ct_store;     // CT entries to be deleted
 };
 
@@ -714,30 +729,40 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
                                struct nf_conntrack *ct, void *data)
 {
     struct delete_ct_dump_cb_args *cb_args;
-    struct in_addr *src_addr, *dst_addr;
-    bool in_ips_migrated, in_ips_on_host;
+    bool in_migrated, in_on_host;
 
-    /* Delete path is IP-only today; pass SAVE_INPUT_IPS to keep legacy
-     * behaviour bit-identical. Step 3 will revisit this. */
-    if (!validate_ct_entry(type, ct, SAVE_INPUT_IPS)) {
+    cb_args = data;
+
+    if (!validate_ct_entry(type, ct, cb_args->kind)) {
         return NFCT_CB_CONTINUE;
     }
 
-    cb_args = data;
-    src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
-    dst_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_DST);
-    if (src_addr == NULL || dst_addr == NULL) {
-        LOG(WARNING, "%s: ct entry with NULL src/dst IP received. Skipping.",
-            __func__);
-        return NFCT_CB_FAILURE;
-    }
-    in_ips_migrated = is_src_or_dst_in_hashtable(src_addr, dst_addr,
-                                                 cb_args->ips_migrated);
-    in_ips_on_host = is_src_or_dst_in_hashtable(src_addr, dst_addr,
-                                                cb_args->ips_on_host);
+    if (cb_args->kind == SAVE_INPUT_IPS) {
+        struct in_addr *src_addr, *dst_addr;
 
-    if (in_ips_migrated && !in_ips_on_host) {
+        src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
+        dst_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_DST);
+        if (src_addr == NULL || dst_addr == NULL) {
+            LOG(WARNING, "%s: ct entry with NULL src/dst IP received. "
+                "Skipping.", __func__);
+            return NFCT_CB_FAILURE;
+        }
+
+        in_migrated = is_src_or_dst_in_hashtable(src_addr, dst_addr,
+                                                 cb_args->ips_migrated);
+        in_on_host  = is_src_or_dst_in_hashtable(src_addr, dst_addr,
+                                                 cb_args->ips_on_host);
+    } else {   /* SAVE_INPUT_PORT_ZONES */
+        uint16_t zone = ct_get_migration_zone(ct);
+
+        in_migrated = is_zone_in_hashtable(zone, cb_args->zones_migrated);
+        in_on_host  = (cb_args->zones_on_host != NULL) &&
+                      is_zone_in_hashtable(zone, cb_args->zones_on_host);
+    }
+
+    if (in_migrated && !in_on_host) {
         uint32_t ct_id = nfct_get_attr_u32(ct, ATTR_ID);
+
         if (ct_id == 0) {
             LOG(WARNING, "%s: ct entry with 0 id received. Skipping.",
                 __func__);
@@ -794,22 +819,18 @@ ct_destroy_g_wrapper(void *ct)
  * migration.
  *
  * To clear up the conntrack entries the following procedure is followed:
- *   1. Create hashtables for ips_migrated and ips_on_host.
- *   2. Get the conntrack dump and filter the conntrack entries for which
- *      either of src/dest ips are present in the ips_migrated but not in
- *      ips_on_host.
- *   3. For each of the filtered entry, send the delete call to the netlink
- *      socket.
+ *   1. Take a CT dump from the kernel.
+ *   2. For each dumped entry, decide via the mode-aware filter
+ *      (delete_conntrack_dump_callback) whether it should be deleted.
+ *      Selected entries are stolen into a local ct_store.
+ *   3. For each entry in ct_store, send NFCT_Q_DESTROY to the kernel.
  *
  * Args:
  *   @handle handle to the netlink socket.
- *   @ips_migrated IP addresses for which CT entries have been migrated.
- *   @ips_on_host IP addresses that are currently present on this host.
+ *   @args   delete-thread arguments. Mode-aware via args->kind.
  */
 static void
-_delete_ct_entries(struct nfct_handle *handle,
-                   GHashTable *ips_migrated,
-                   GHashTable *ips_on_host)
+_delete_ct_entries(struct nfct_handle *handle, struct ct_delete_args *args)
 {
     struct delete_ct_dump_cb_args cb_args;
     int ret, failed, success;
@@ -821,9 +842,12 @@ _delete_ct_entries(struct nfct_handle *handle,
                                      NULL, ct_destroy_g_wrapper);
 
     // Take conntrack dump to get the entries to be deleted.
-    cb_args.ips_migrated = ips_migrated;
-    cb_args.ips_on_host = ips_on_host;
-    cb_args.ct_store = ct_store;
+    cb_args.kind            = args->kind;
+    cb_args.ips_migrated    = args->ips_migrated;
+    cb_args.ips_on_host     = args->ips_on_host;
+    cb_args.zones_migrated  = args->zones_migrated;
+    cb_args.zones_on_host   = args->zones_on_host;
+    cb_args.ct_store        = ct_store;
 
     ret = _conntrack_dump(handle, delete_conntrack_dump_callback, &cb_args);
     if (ret == -1) {
@@ -832,8 +856,10 @@ _delete_ct_entries(struct nfct_handle *handle,
         goto finish;
     }
 
-    LOG(INFO, "%s: starting conntrack entry delete. "
-        "Entries to delete %d", __func__, g_hash_table_size(cb_args.ct_store));
+    LOG(INFO, "%s: starting conntrack entry delete (kind=%s). "
+        "Entries to delete %d", __func__,
+        save_input_kind_to_string(args->kind),
+        g_hash_table_size(cb_args.ct_store));
 
     failed = success = 0;
     // Iterate over the ct_store to delete the entries.
@@ -847,8 +873,9 @@ _delete_ct_entries(struct nfct_handle *handle,
         }
     }
 
-    LOG(INFO, "%s: Finished conntrack entry delete. Success: %d, Failed: %d",
-        __func__, success, failed);
+    LOG(INFO, "%s: Finished conntrack entry delete (kind=%s). "
+        "Success: %d, Failed: %d", __func__,
+        save_input_kind_to_string(args->kind), success, failed);
 
 finish:
     if (ct_store != NULL) {
@@ -861,16 +888,18 @@ finish:
  * migration.
  *
  * The following procedure is performed for conntrack entry cleanup:
- * 1. Delete thread is started during initialisation phase of the binary.
- * 2. The ip address passed to the binary are reused as "ips_migrated"
- * 3. The thread waits on the clear_called condition. This dbus-server on
- *    Clear IPC will get the IP addresses present on this host (ips_on_host),
- *    and wake up this thread.
- * 4. The delete procedure is performed afterwards. See _delete_ct_entries for
- *    more details.
+ * 1. Delete thread is started during initialisation phase of the binary
+ *    (in both IP and zone sub-modes; see start_in_save_mode).
+ * 2. The migrated set (ips_to_migrate / zones_to_migrate) is pinned on
+ *    ct_del_args before this thread is created.
+ * 3. The thread waits on the clear_called condition. dbus-server on
+ *    Clear IPC populates the "on host" set (ips_on_host / zones_on_host),
+ *    and wakes up this thread.
+ * 4. The delete procedure is performed afterwards. See _delete_ct_entries
+ *    for more details.
  *
  *  Args:
- *    @data Pointer to the delete arguments.
+ *    @data Pointer to struct ct_delete_args.
  *
  *  Returns:
  *    NULL
@@ -883,7 +912,8 @@ delete_ct_entries(void *data)
 
     ct_del_args = data;
 
-    LOG(INFO, "%s: Starting conntrack delete thread", __func__);
+    LOG(INFO, "%s: Starting conntrack delete thread (kind=%s)", __func__,
+        save_input_kind_to_string(ct_del_args->kind));
     LOG(INFO, "%s: waiting on clear condition.", __func__);
     pthread_mutex_lock(&ct_del_args->mutex);
     while (!ct_del_args->clear_called) {
@@ -897,7 +927,7 @@ delete_ct_entries(void *data)
         goto unlock;
     }
 
-    _delete_ct_entries(h, ct_del_args->ips_migrated, ct_del_args->ips_on_host);
+    _delete_ct_entries(h, ct_del_args);
     nfct_close(h);
 
 unlock:

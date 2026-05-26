@@ -66,6 +66,16 @@ struct load_targets {
     GHashTable *zone_remap;
 };
 
+/**
+ * Returns a human-readable, log-friendly name for a SAVE sub-mode.
+ *
+ * Used so log lines that fan out through both IP-mode and zone-mode
+ * paths can self-identify their mode without the operator having to
+ * grep backwards for the bootstrap banner.
+ */
+ const char *
+ save_input_kind_to_string(enum save_input_kind kind);
+ 
 GHashTable *
 create_hashtable_from_ip_list(const char *[], int);
 
@@ -80,6 +90,16 @@ create_hashtable_from_zone_and_port_list(const char *zones[],
                                          const char *port_uuids[],
                                          int n_entries,
                                          GHashTable **out_ports);
+
+/**
+ * Builds a uint16-keyed hashtable from a strv of decimal zone strings.
+ *
+ * Used by the zone-mode Clear D-Bus endpoint to translate the "zones
+ * still on this host" payload into a hashtable for the delete dump
+ * callback to look up against.
+ */
+GHashTable *
+create_hashtable_from_zone_str_list(const char *zones[], int num_entries);
 
 struct save_targets *
 save_targets_new_from_ips(GHashTable *ips_to_migrate);

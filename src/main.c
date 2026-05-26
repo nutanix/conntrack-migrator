@@ -106,8 +106,11 @@ const char *mode_to_string[] = {
 };
 
 struct ct_delete_args ct_del_args = {
+    .kind = SAVE_INPUT_IPS,       /* overwritten in start_in_save_mode */
     .ips_migrated = NULL,
     .ips_on_host = NULL,
+    .zones_migrated = NULL,
+    .zones_on_host = NULL,
     .clear_called = false,
     .mutex = PTHREAD_MUTEX_INITIALIZER,
     .clear_called_cond = PTHREAD_COND_INITIALIZER
@@ -187,14 +190,15 @@ dump_conntrack(struct save_targets *targets)
  * Start threads required for save mode of operation.
  *
  * Following things are performed in the save mode:
- * 1. (IP mode only) Conntrack delete thread is started which waits till
- *    Clear IPC is called.
+ * 1. Conntrack delete thread is started which waits till Clear IPC is
+ *    called. The thread is started in both IP and zone sub-modes; it
+ *    dispatches on ct_del_args.kind when it wakes up.
  * 2. Conntrack events threads are started to filter events for the
  *    migration targets. In IP mode this is two BPF-filtered threads
  *    (one src, one dst). In zone mode BPF can't filter on CT zone, so a
  *    single unfiltered thread is started and the callback does the zone
  *    match in-process.
- *    If any update is received for a non-exisitent entry, it is treated
+ *    If any update is received for a non-existent entry, it is treated
  *    as NEW since it contains the base five tuple information required to
  *    identify flow. Similarly, if a destroy event is received for a
  *    non-existent entry, it is ignored.
@@ -203,9 +207,6 @@ dump_conntrack(struct save_targets *targets)
  *
  * The above workflow is used to maintain a local copy of the CT entries for
  * the VM.
- *
- * NOTE: zone-mode cleanup (Clear/delete) is deferred to Step 3; the zone
- * branch deliberately does not start the delete thread.
  *
  * Args:
  *   @targets SAVE targets bundle (mode-aware) for which CT entries have
@@ -226,6 +227,7 @@ start_in_save_mode(struct save_targets *targets, bool *stop_flag)
 
         // Start the delete thread.
         // NOTE: ct_del_args is an extern global variable
+        ct_del_args.kind         = SAVE_INPUT_IPS;
         ct_del_args.ips_migrated = targets->ips_to_migrate;
 
         num_ips = g_hash_table_size(targets->ips_to_migrate);
@@ -324,6 +326,27 @@ start_in_save_mode(struct save_targets *targets, bool *stop_flag)
             return 0;
         }
 
+        // Wire up the delete-thread state for zone mode.
+        // NOTE: ct_del_args is an extern global variable
+        ct_del_args.kind           = SAVE_INPUT_PORT_ZONES;
+        ct_del_args.zones_migrated = targets->zones_to_migrate;
+
+        // Conntrack delete thread (mode-aware: dispatches on
+        // ct_del_args.kind when on_clear wakes it up).
+        ret = pthread_create(&ct_del_args.tid, NULL,
+                             &delete_ct_entries,
+                             (void *)&ct_del_args);
+        if (ret != 0) {
+            LOG(ERROR, "%s: CT delete thread creation failed. %s", __func__,
+                strerror(ret));
+            return -1;
+        }
+        ret = pthread_setname_np(ct_del_args.tid, "ct_delete");
+        if (ret != 0) {
+            LOG(WARNING, "%s: Failed to set thread name \"ct_delete\": %s",
+                __func__, strerror(ret));
+        }
+
         // BPF can't filter on CT zone, so we don't split src/dst threads.
         // One unfiltered events thread is enough; the callback does the
         // zone match in-process.
@@ -348,9 +371,10 @@ start_in_save_mode(struct save_targets *targets, bool *stop_flag)
         // Get all the conntrack entries for the given zones.
         dump_conntrack(targets);
 
-        // Wait for the events thread to be stopped. Zone-mode cleanup
-        // (Clear/delete) is deferred to Step 3; no delete thread to join.
+        // Wait for the events thread, then the delete thread. Same order
+        // as the IP branch above.
         pthread_join(zone_targs->tid, NULL);
+        pthread_join(ct_del_args.tid, NULL);
 
         g_free(zone_targs);
 

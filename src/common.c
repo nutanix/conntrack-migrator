@@ -32,6 +32,21 @@
 #define PORT_UUID_PREFIX_LEN (sizeof(PORT_UUID_PREFIX) - 1)
 
 /**
+ * Returns a human-readable name for a SAVE sub-mode.
+ *
+ * See declaration in common.h for full doc.
+ */
+const char *
+save_input_kind_to_string(enum save_input_kind kind)
+{
+    switch (kind) {
+    case SAVE_INPUT_IPS:        return "IPS";
+    case SAVE_INPUT_PORT_ZONES: return "PORT_ZONES";
+    }
+    return "UNKNOWN";
+}
+
+/**
  * Creates hashtable from IP addresses list.
  *
  * This function allocates a hashtable which converts the string
@@ -244,6 +259,48 @@ create_hashtable_from_zone_and_port_list(const char *zones[],
 
     *out_ports = ports_ht;
     return zones_ht;
+}
+
+/**
+ * Builds a uint16-keyed hashtable from a strv of decimal zone strings.
+ *
+ * See declaration in common.h for full doc. Caller owns the returned
+ * table. Keys are inlined pointer values (no destroyers attached);
+ * value slots are unused (kept as 1) to mirror create_hashtable_from_ip_list.
+ *
+ * Args:
+ *   @zones       strv of decimal zone strings (e.g. {"100", "200"}).
+ *                Elements at indexes < num_entries must be non-NULL.
+ *   @num_entries number of zones in @zones.
+ *
+ * Returns:
+ *   newly-allocated GHashTable on success; NULL on parse error (any
+ *   partially-built table is torn down before return).
+ */
+GHashTable *
+create_hashtable_from_zone_str_list(const char *zones[], int num_entries)
+{
+    GHashTable *ht;
+    int i;
+
+    ht = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+    for (i = 0; i < num_entries; i++) {
+        uint16_t zone;
+
+        if (!parse_ct_zone(zones[i], &zone)) {
+            LOG(ERROR, "%s: invalid zone string at index %d: '%s'",
+                __func__, i, zones[i] ? zones[i] : "(null)");
+            g_hash_table_destroy(ht);
+            return NULL;
+        }
+        g_hash_table_insert(ht, GUINT_TO_POINTER((guint) zone),
+                            GINT_TO_POINTER(1));
+    }
+
+    LOG(INFO, "%s: Built zones_on_host hashtable: %d unique zones",
+        __func__, g_hash_table_size(ht));
+    return ht;
 }
 
 /**

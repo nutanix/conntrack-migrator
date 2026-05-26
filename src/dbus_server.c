@@ -328,13 +328,23 @@ complete_on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation)
 /**
  * RPC endpoint for Clear message.
  *
- * This function is called at the source host. At the end of
- * successful migration, we want to remove the CT entries of the VM that has
- * been migrated from the host. This function receives the list of ip_address
- * that are currently present on this host. The list of ip_address that have
- * been migrated are already available to us when we started the helper.
- * Thus, on receiving the clear call we signal the conntrack delete thread to
- * clear the migrated conntrack entries.
+ * Called at the source host at the end of a successful migration to
+ * remove the CT entries of the VM that has been migrated.
+ *
+ * Payload shape, in both modes, is "as" (array of strings). The
+ * interpretation depends on the helper's active SAVE sub-mode, which
+ * is fixed at start-up in start_in_save_mode and recorded on
+ * ct_del_args.kind (an extern global declared in ct_delete_args.h):
+ *
+ *   - IP mode  (SAVE_INPUT_IPS)        : each string is an IPv4 address
+ *                                        currently present on this host.
+ *   - Zone mode (SAVE_INPUT_PORT_ZONES): each string is a decimal CT zone
+ *                                        currently owned by a port still
+ *                                        on this host.
+ *
+ * On success the parsed set is published to ct_del_args under the lock,
+ * the clear_called condition is signalled, and the delete thread wakes
+ * up to do the actual NFCT_Q_DESTROY work.
  *
  * NOTE: the reason for performing this operation asynchronously is that
  * migrate task should not be held up just for the cleanup. And also since
@@ -357,31 +367,49 @@ static gboolean
 on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
                  const gchar *arg_data, gpointer user_data)
 {
-    LOG(INFO, "%s: Clear start", __func__);
+    LOG(INFO, "%s: Clear start (kind=%s)", __func__,
+        save_input_kind_to_string(ct_del_args.kind));
     GVariant *args, *var;
-    gsize num_ip_address = 0;
-    char **ip_addresses;
-    GHashTable *ips_on_host;
+    gsize num_entries = 0;
+    char **payload;
+    GHashTable *ips_on_host   = NULL;
+    GHashTable *zones_on_host = NULL;
+    bool parse_ok;
 
     args = g_dbus_method_invocation_get_parameters(invocation);
     var = g_variant_get_child_value(args, 0);
-    ip_addresses = g_variant_dup_strv(var, &num_ip_address);
+    payload = g_variant_dup_strv(var, &num_entries);
 
-    ips_on_host = create_hashtable_from_ip_list((const char **)ip_addresses,
-                                                num_ip_address);
-    g_strfreev(ip_addresses);
-    if (ips_on_host == NULL) {
-        LOG(ERROR, "%s: Failed to create ips_on_host", __func__);
+    if (ct_del_args.kind == SAVE_INPUT_IPS) {
+        ips_on_host = create_hashtable_from_ip_list(
+                          (const char **)payload, num_entries);
+        parse_ok = (ips_on_host != NULL);
+    } else {   /* SAVE_INPUT_PORT_ZONES */
+        zones_on_host = create_hashtable_from_zone_str_list(
+                            (const char **)payload, num_entries);
+        parse_ok = (zones_on_host != NULL);
+    }
+    g_strfreev(payload);
+
+    if (!parse_ok) {
+        LOG(ERROR, "%s: Failed to parse %s payload", __func__,
+            ct_del_args.kind == SAVE_INPUT_IPS ? "ips_on_host"
+                                              : "zones_on_host");
         return complete_on_clear(object, invocation);
     }
 
     pthread_mutex_lock(&ct_del_args.mutex);
-    ct_del_args.ips_on_host = ips_on_host;
+    if (ct_del_args.kind == SAVE_INPUT_IPS) {
+        ct_del_args.ips_on_host = ips_on_host;
+    } else {
+        ct_del_args.zones_on_host = zones_on_host;
+    }
     ct_del_args.clear_called = true;
     pthread_cond_signal(&ct_del_args.clear_called_cond);
     pthread_mutex_unlock(&ct_del_args.mutex);
 
-    LOG(INFO, "%s: Clear completed", __func__);
+    LOG(INFO, "%s: Clear completed (received %zu %s)", __func__, num_entries,
+        ct_del_args.kind == SAVE_INPUT_IPS ? "IPs" : "zones");
     return complete_on_clear(object, invocation);
 }
 

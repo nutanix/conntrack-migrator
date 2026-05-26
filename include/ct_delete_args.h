@@ -21,13 +21,33 @@
 
 /**
  * Represents the arguments to be passed to the thread responsible
- * for cleanining up the conntrack entries in source hypervisor upon
+ * for cleaning up the conntrack entries in source hypervisor upon
  * successful migration.
+ *
+ * Tagged union over the active SAVE sub-mode:
+ *   kind == SAVE_INPUT_IPS         -> ips_migrated / ips_on_host valid.
+ *   kind == SAVE_INPUT_PORT_ZONES  -> zones_migrated / zones_on_host valid.
+ *
+ * Ownership:
+ *   - ips_migrated / zones_migrated are aliases into save_targets and must
+ *     not be freed by the delete thread.
+ *   - ips_on_host / zones_on_host are built by on_clear and consumed by
+ *     the delete thread; they are released alongside process exit since
+ *     the daemon is short-lived.
  */
 struct ct_delete_args {
     pthread_t tid;             // Represents the thread ID
+    enum save_input_kind kind; // Active SAVE sub-mode; selects which set
+                               // of pointers below is valid.
+
+    /* IP-mode state */
     GHashTable *ips_migrated;  // IP addresses migrated from this host
     GHashTable *ips_on_host;   // IP addresses currently on this host
+
+    /* Zone-mode state */
+    GHashTable *zones_migrated; // CT zones migrated from this host
+    GHashTable *zones_on_host;  // CT zones currently owned by ports on this host
+
     bool clear_called;         // Flag to indicate if clear DBUS IPC is invoked
     pthread_mutex_t mutex;            // mutex for the condition var
     pthread_cond_t clear_called_cond; // Condition to wait until the clear IPC is called
