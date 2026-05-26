@@ -73,8 +73,8 @@ struct load_targets {
  * paths can self-identify their mode without the operator having to
  * grep backwards for the bootstrap banner.
  */
- const char *
- save_input_kind_to_string(enum save_input_kind kind);
+const char *
+save_input_kind_to_string(enum save_input_kind kind);
  
 GHashTable *
 create_hashtable_from_ip_list(const char *[], int);
