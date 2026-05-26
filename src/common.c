@@ -228,75 +228,46 @@ ensure_cli_arg_is_int_at_least(const char *arg_value, int *out_value,
 }
 
 /**
- * Builds the (zones_to_migrate, ports_to_migrate) hashtable pair from
- * parallel parsed-CLI arrays.
+ * Builds the zones_to_migrate hashtable from a parsed-CLI zone array.
  *
  * Inputs are already arity- and content-validated by check_zone_save_args
- * (in main.c) before this is called, so a parse failure here is treated as
- * a defensive bug-in-caller and both tables are torn down.
+ * (in main.c) before this is called, so a parse failure here is treated
+ * as a defensive bug-in-caller and the partial table is torn down.
  *
- * Ownership: both returned tables are caller-owned. The "zones" table is
- * the function return value; the "ports" table is returned via @out_ports.
- * Keys/values are copied (g_strdup / g_memdup) so the argv slices the
- * caller passed do not need to outlive the tables.
+ * Ownership: the returned table is caller-owned. Keys are inlined zone
+ * values (no destroyers attached); value slots are unused (kept as 1)
+ * to mirror create_hashtable_from_ip_list.
  *
  * Args:
- *   @zones      array of nul-terminated decimal zone strings (length n)
- *   @port_uuids array of nul-terminated UUID strings (length n)
- *   @n_entries  number of (zone, port_uuid) pairs
- *   @out_ports  output: ports_to_migrate hashtable (port_uuid -> uint16 zone)
+ *   @zones     array of nul-terminated decimal zone strings (length n)
+ *   @n_entries number of zone strings to consume
  *
  * Returns:
- *   zones_to_migrate hashtable on success, NULL on failure (in which case
- *   *out_ports is left set to NULL).
+ *   zones_to_migrate hashtable on success, NULL on failure.
  */
 GHashTable *
-create_hashtable_from_zone_and_port_list(const char *zones[],
-                                         const char *port_uuids[],
-                                         int n_entries,
-                                         GHashTable **out_ports)
+create_hashtable_from_zone_list(const char *zones[], int n_entries)
 {
     int i;
     GHashTable *zones_ht;
-    GHashTable *ports_ht;
-
-    if (out_ports == NULL) {
-        return NULL;
-    }
-    *out_ports = NULL;
 
     zones_ht = g_hash_table_new(g_direct_hash, g_direct_equal);
-    ports_ht = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
 
     for (i = 0; i < n_entries; i++) {
         uint16_t zone;
-        uint16_t *zone_val;
 
         if (!parse_ct_zone(zones[i], &zone)) {
             LOG(ERROR, "%s: Invalid zone at index %d: '%s'", __func__,
                 i, zones[i]);
             g_hash_table_destroy(zones_ht);
-            g_hash_table_destroy(ports_ht);
-            return NULL;
-        }
-        if (!is_valid_uuid_string(port_uuids[i])) {
-            LOG(ERROR, "%s: Invalid port UUID at index %d: '%s'", __func__,
-                i, port_uuids[i]);
-            g_hash_table_destroy(zones_ht);
-            g_hash_table_destroy(ports_ht);
             return NULL;
         }
 
         g_hash_table_insert(zones_ht,
                             GUINT_TO_POINTER((guint) zone),
                             GINT_TO_POINTER(1));
-
-        zone_val = g_malloc(sizeof(*zone_val));
-        *zone_val = zone;
-        g_hash_table_insert(ports_ht, g_strdup(port_uuids[i]), zone_val);
     }
 
-    *out_ports = ports_ht;
     return zones_ht;
 }
 
@@ -403,27 +374,25 @@ save_targets_new_from_ips(GHashTable *ips_to_migrate)
 }
 
 /**
- * Allocates a save_targets bundle wrapping a (zones, ports) pair.
+ * Allocates a save_targets bundle wrapping a zones_to_migrate hashtable.
  *
- * Takes ownership of both hashtables; subsequent save_targets_destroy()
- * will destroy them.
+ * Takes ownership of @zones; subsequent save_targets_destroy() will
+ * destroy it.
  *
  * Args:
  *   @zones zones_to_migrate hashtable. Must be non-NULL.
- *   @ports ports_to_migrate hashtable. Must be non-NULL.
  *
  * Returns:
  *   pointer to the bundle. Process aborts on allocation failure.
  */
 struct save_targets *
-save_targets_new_from_zones_and_ports(GHashTable *zones, GHashTable *ports)
+save_targets_new_from_zones(GHashTable *zones)
 {
     struct save_targets *targets;
 
     targets = g_malloc0(sizeof(*targets));
     targets->kind = SAVE_INPUT_PORT_ZONES;
     targets->zones_to_migrate = zones;
-    targets->ports_to_migrate = ports;
     return targets;
 }
 
@@ -447,9 +416,6 @@ save_targets_destroy(struct save_targets *targets)
     }
     if (targets->zones_to_migrate != NULL) {
         g_hash_table_destroy(targets->zones_to_migrate);
-    }
-    if (targets->ports_to_migrate != NULL) {
-        g_hash_table_destroy(targets->ports_to_migrate);
     }
 
     g_free(targets);

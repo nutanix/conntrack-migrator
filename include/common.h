@@ -41,15 +41,13 @@ enum load_input_kind {
 /**
  * Bundle of SAVE-side migration targets. Tagged union over CLI sub-mode:
  *   kind == SAVE_INPUT_IPS         -> ips_to_migrate is set
- *   kind == SAVE_INPUT_PORT_ZONES  -> zones_to_migrate and ports_to_migrate
- *                                     are set
+ *   kind == SAVE_INPUT_PORT_ZONES  -> zones_to_migrate is set
  * All hashtables are owned by save_targets and freed by save_targets_destroy.
  */
 struct save_targets {
     enum save_input_kind kind;
     GHashTable *ips_to_migrate;
     GHashTable *zones_to_migrate;
-    GHashTable *ports_to_migrate;
 };
 
 /**
@@ -149,10 +147,7 @@ ensure_cli_arg_is_int_at_least(const char *arg_value, int *out_value,
                                const char *arg_name, int min_value);
 
 GHashTable *
-create_hashtable_from_zone_and_port_list(const char *zones[],
-                                         const char *port_uuids[],
-                                         int n_entries,
-                                         GHashTable **out_ports);
+create_hashtable_from_zone_list(const char *zones[], int n_entries);
 
 /**
  * Builds a uint16-keyed hashtable from a strv of paired
@@ -176,7 +171,7 @@ struct save_targets *
 save_targets_new_from_ips(GHashTable *ips_to_migrate);
 
 struct save_targets *
-save_targets_new_from_zones_and_ports(GHashTable *zones, GHashTable *ports);
+save_targets_new_from_zones(GHashTable *zones);
 
 void
 save_targets_destroy(struct save_targets *);

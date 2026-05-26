@@ -415,45 +415,40 @@ create_ips_ht_from_args(char *argv[])
 }
 
 /**
- * Creates the (zones_to_migrate, ports_to_migrate) hashtable pair from the
- * SAVE port-zone CLI arguments.
+ * Creates the zones_to_migrate hashtable from the SAVE port-zone CLI
+ * arguments.
  *
- * Walks argv at the SAVE_PORT_ZONE_STRIDE-strided offsets, splits out the
- * port_uuid and old_ct_zone columns, and hands the parallel arrays to
- * create_hashtable_from_zone_and_port_list().
+ * Walks argv at the SAVE_PORT_ZONE_STRIDE-strided offsets, extracts the
+ * old_ct_zone column (the port_uuid column has already been validated
+ * pre-fork by check_zone_save_args and is otherwise discarded - the
+ * delete path filters strictly on CT zone), and hands the array to
+ * create_hashtable_from_zone_list().
  *
  * Args:
- *   @argv      array of CLI args.
- *   @out_ports output: ports_to_migrate hashtable.
+ *   @argv array of CLI args.
  *
  * Returns:
- *   zones_to_migrate hashtable on success, NULL on failure (in which case
- *   *out_ports is left set to NULL).
+ *   zones_to_migrate hashtable on success, NULL on failure.
  */
 static GHashTable *
-create_zones_and_port_ht_from_args(char *argv[], GHashTable **out_ports)
+create_zones_ht_from_args(char *argv[])
 {
     int n_entries;
     int i;
     const char **zones;
-    const char **port_uuids;
     GHashTable *ht;
 
     ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n_entries,
                                    "num_entries",
                                    MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
     zones = g_malloc0(sizeof(*zones) * n_entries);
-    port_uuids = g_malloc0(sizeof(*port_uuids) * n_entries);
     for (i = 0; i < n_entries; i++) {
         int base = ENTRIES_LIST_START_ARG_INDEX + (i * SAVE_PORT_ZONE_STRIDE);
-        port_uuids[i] = argv[base];
         zones[i] = argv[base + 1];
     }
 
-    ht = create_hashtable_from_zone_and_port_list(zones, port_uuids,
-                                                  n_entries, out_ports);
+    ht = create_hashtable_from_zone_list(zones, n_entries);
     g_free(zones);
-    g_free(port_uuids);
 
     if (ht == NULL) {
         LOG(ERROR, "%s: Hashtable creation failed.", __func__);
@@ -735,15 +730,12 @@ dmain(int argc, char *argv[])
             }
             save_targets = save_targets_new_from_ips(ips_to_migrate);
         } else {
-            GHashTable *zones_ht = NULL;
-            GHashTable *ports_ht = NULL;
-            zones_ht = create_zones_and_port_ht_from_args(argv, &ports_ht);
+            GHashTable *zones_ht = create_zones_ht_from_args(argv);
             if (zones_ht == NULL) {
                 rc = EINVAL;
                 goto cleanup;
             }
-            save_targets = save_targets_new_from_zones_and_ports(zones_ht,
-                                                                 ports_ht);
+            save_targets = save_targets_new_from_zones(zones_ht);
         }
 
         ret = start_in_save_mode(save_targets, &stop_flag);
