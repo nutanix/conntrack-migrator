@@ -313,11 +313,9 @@ start_in_save_mode(struct save_targets *targets, bool *stop_flag)
         g_free(src_targs);
         g_free(dst_targs);
 
-        return 0;
-    }
+    } else {
 
-    /* SAVE_INPUT_PORT_ZONES */
-    {
+         /* SAVE_INPUT_PORT_ZONES */
         uint32_t num_zones = g_hash_table_size(targets->zones_to_migrate);
 
         if (num_zones == 0) {
@@ -356,8 +354,9 @@ start_in_save_mode(struct save_targets *targets, bool *stop_flag)
 
         g_free(zone_targs);
 
-        return 0;
     }
+
+    return 0;
 }
 
 /**
