@@ -21,8 +21,15 @@
 #include "common.h"
 #include "log.h"
 
-/* Canonical UUID hex string length: 8-4-4-4-12 = 36 chars. */
+/* Canonical UUID body length: 8-4-4-4-12 = 36 chars. */
 #define UUID_STRING_LEN 36
+
+/* Required literal prefix for the port-UUID wire form.
+ * Full accepted shape is: "port_" + <canonical 8-4-4-4-12 UUID>, total 41
+ * characters. The prefix is part of the value supplied by libvirt and is
+ * preserved verbatim in any storage (hashtable keys, log lines, etc.). */
+#define PORT_UUID_PREFIX     "port_"
+#define PORT_UUID_PREFIX_LEN (sizeof(PORT_UUID_PREFIX) - 1)
 
 /**
  * Creates hashtable from IP addresses list.
@@ -80,11 +87,15 @@ create_hashtable_from_ip_list(const char *ip_list[], int num_ips)
 }
 
 /**
- * Validates that @s is a canonical 8-4-4-4-12 hex UUID string.
+ * Validates that @s is a port-prefixed UUID string of the form
+ * "port_<canonical 8-4-4-4-12 hex UUID>" (total length 41).
  *
- * No version/variant bit checks - any 36-char hex-with-hyphens string
- * is accepted. This is intentionally permissive: callers (e.g. libvirt)
- * pass UUIDs in canonical form and we only need to reject obvious junk.
+ * The "port_" prefix is the wire form supplied by libvirt and is part of
+ * the value; this validator rejects bare UUIDs without the prefix. The
+ * UUID body is checked structurally only - dashes at offsets 8/13/18/23
+ * and hex (case-insensitive) everywhere else. No version/variant bit
+ * checks: callers pass canonical UUIDs and we only need to reject
+ * obvious junk.
  *
  * Args:
  *   @s nul-terminated candidate string. May be NULL.
@@ -97,7 +108,15 @@ is_valid_uuid_string(const char *s)
 {
     int i;
 
-    if (s == NULL || strlen(s) != UUID_STRING_LEN) {
+    if (s == NULL) {
+        return false;
+    }
+    if (strncmp(s, PORT_UUID_PREFIX, PORT_UUID_PREFIX_LEN) != 0) {
+        return false;
+    }
+    s += PORT_UUID_PREFIX_LEN;
+
+    if (strlen(s) != UUID_STRING_LEN) {
         return false;
     }
 

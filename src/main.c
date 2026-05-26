@@ -772,7 +772,8 @@ check_ip_save_args(int argc, char *argv[])
  *
  * Arity (argc vs declared N) is guaranteed by detect_save_input_kind()
  * before we get here, so we only validate the *content* of each entry:
- *  - port_uuid is a canonical 8-4-4-4-12 hex UUID,
+ *  - port_uuid is a port-prefixed canonical UUID of the form
+ *    "port_<8-4-4-4-12>" (total length 41),
  *  - old_ct_zone parses cleanly as uint16.
  *
  * Aborts the process via errx() on the first malformed entry.
