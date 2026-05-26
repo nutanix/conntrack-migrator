@@ -12,6 +12,7 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -338,9 +339,14 @@ complete_on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation)
  *
  *   - IP mode  (SAVE_INPUT_IPS)        : each string is an IPv4 address
  *                                        currently present on this host.
- *   - Zone mode (SAVE_INPUT_PORT_ZONES): each string is a decimal CT zone
- *                                        currently owned by a port still
- *                                        on this host.
+ *   - Zone mode (SAVE_INPUT_PORT_ZONES): a flat strv of paired entries
+ *                                        [port_uuid_0, zone_0,
+ *                                         port_uuid_1, zone_1, ...] where
+ *                                        each zone is a decimal CT zone
+ *                                        currently owned by the named
+ *                                        port still on this host. Length
+ *                                        must be even; the helper only
+ *                                        retains the zone half.
  *
  * On success the parsed set is published to ct_del_args under the lock,
  * the clear_called condition is signalled, and the delete thread wakes
@@ -380,13 +386,37 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
     var = g_variant_get_child_value(args, 0);
     payload = g_variant_dup_strv(var, &num_entries);
 
+    /* Both downstream parsers take an int. g_variant_dup_strv reports a
+     * gsize, so guard against a (theoretical) D-Bus payload that would
+     * silently narrow to a negative or truncated int on the call below.
+     * In practice num_entries is tiny, but failing fast at the IPC
+     * boundary is cheaper than reasoning about it later. */
+    if (num_entries > INT_MAX) {
+        LOG(ERROR, "%s: clear payload too large for int (%zu entries)",
+            __func__, num_entries);
+        g_strfreev(payload);
+        return complete_on_clear(object, invocation);
+    }
+
+    /* Zone-mode clear payload is paired (port_uuid, zone). Catch a
+     * malformed odd-length strv up front so the parser doesn't have to
+     * own this protocol-level invariant on its own. */
+    if (ct_del_args.kind == SAVE_INPUT_PORT_ZONES &&
+        (num_entries % 2) != 0) {
+        LOG(ERROR, "%s: zone-mode clear payload must be paired "
+            "(port_uuid, zone); got odd length %zu",
+            __func__, num_entries);
+        g_strfreev(payload);
+        return complete_on_clear(object, invocation);
+    }
+
     if (ct_del_args.kind == SAVE_INPUT_IPS) {
         ips_on_host = create_hashtable_from_ip_list(
-                          (const char **)payload, num_entries);
+                          (const char **)payload, (int) num_entries);
         parse_ok = (ips_on_host != NULL);
     } else {   /* SAVE_INPUT_PORT_ZONES */
-        zones_on_host = create_hashtable_from_zone_str_list(
-                            (const char **)payload, num_entries);
+        zones_on_host = create_hashtable_from_port_zone_pairs(
+                            (const char **)payload, (int) num_entries);
         parse_ok = (zones_on_host != NULL);
     }
     g_strfreev(payload);
@@ -408,8 +438,13 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
     pthread_cond_signal(&ct_del_args.clear_called_cond);
     pthread_mutex_unlock(&ct_del_args.mutex);
 
-    LOG(INFO, "%s: Clear completed (received %zu %s)", __func__, num_entries,
-        ct_del_args.kind == SAVE_INPUT_IPS ? "IPs" : "zones");
+    if (ct_del_args.kind == SAVE_INPUT_IPS) {
+        LOG(INFO, "%s: Clear completed (received %zu IPs)",
+            __func__, num_entries);
+    } else {
+        LOG(INFO, "%s: Clear completed (received %zu port/zone pairs)",
+            __func__, num_entries / 2);
+    }
     return complete_on_clear(object, invocation);
 }
 

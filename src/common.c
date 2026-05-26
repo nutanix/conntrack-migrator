@@ -262,45 +262,82 @@ create_hashtable_from_zone_and_port_list(const char *zones[],
 }
 
 /**
- * Builds a uint16-keyed hashtable from a strv of decimal zone strings.
+ * Builds a uint16-keyed hashtable from a strv of paired
+ * [port_uuid_0, zone_0, port_uuid_1, zone_1, ...] elements.
  *
- * See declaration in common.h for full doc. Caller owns the returned
- * table. Keys are inlined pointer values (no destroyers attached);
- * value slots are unused (kept as 1) to mirror create_hashtable_from_ip_list.
+ * See declaration in common.h for the full contract. Caller owns the
+ * returned table. Keys are inlined pointer values (no destroyers
+ * attached); value slots are unused (kept as 1) to mirror
+ * create_hashtable_from_ip_list.
+ *
+ * The port_uuid half of each pair is parsed for well-formedness so a
+ * garbled payload is rejected up front, but is otherwise discarded:
+ * the zone-mode delete path only filters on CT zone.
  *
  * Args:
- *   @zones       strv of decimal zone strings (e.g. {"100", "200"}).
- *                Elements at indexes < num_entries must be non-NULL.
- *   @num_entries number of zones in @zones.
+ *   @port_zone_strv flat strv of alternating port_uuid / decimal-zone
+ *                   strings: [port_uuid_0, zone_0, port_uuid_1, zone_1,
+ *                   ...]. Length must be 2 * num_pairs and elements at
+ *                   indexes < num_entries must be non-NULL.
+ *   @num_entries    total number of strv elements (must be even). The
+ *                   pair count is num_entries / 2.
  *
  * Returns:
  *   newly-allocated GHashTable on success; NULL on parse error (any
  *   partially-built table is torn down before return).
  */
 GHashTable *
-create_hashtable_from_zone_str_list(const char *zones[], int num_entries)
+create_hashtable_from_port_zone_pairs(const char *port_zone_strv[],
+                                      int num_entries)
 {
-    GHashTable *ht;
-    int i;
+    GHashTable *zones_on_host;
+    int num_pairs;
+    int pair_idx;
 
-    ht = g_hash_table_new(g_direct_hash, g_direct_equal);
+    if (num_entries % 2 != 0) {
+        LOG(ERROR, "%s: expected even-length strv (port_uuid, zone) pairs, "
+            "got %d entries", __func__, num_entries);
+        return NULL;
+    }
+    num_pairs = num_entries / 2;
 
-    for (i = 0; i < num_entries; i++) {
+    zones_on_host = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+    for (pair_idx = 0; pair_idx < num_pairs; pair_idx++) {
+        const int port_uuid_slot = pair_idx * 2;
+        const int zone_slot      = port_uuid_slot + 1;
+        const char *port_uuid    = port_zone_strv[port_uuid_slot];
+        const char *zone_str     = port_zone_strv[zone_slot];
         uint16_t zone;
 
-        if (!parse_ct_zone(zones[i], &zone)) {
-            LOG(ERROR, "%s: invalid zone string at index %d: '%s'",
-                __func__, i, zones[i] ? zones[i] : "(null)");
-            g_hash_table_destroy(ht);
+        if (port_uuid == NULL || zone_str == NULL) {
+            LOG(ERROR, "%s: NULL element at pair index %d",
+                __func__, pair_idx);
+            g_hash_table_destroy(zones_on_host);
             return NULL;
         }
-        g_hash_table_insert(ht, GUINT_TO_POINTER((guint) zone),
+        if (!is_valid_uuid_string(port_uuid)) {
+            LOG(ERROR, "%s: malformed port UUID at pair index %d: '%s'",
+                __func__, pair_idx, port_uuid);
+            g_hash_table_destroy(zones_on_host);
+            return NULL;
+        }
+        if (!parse_ct_zone(zone_str, &zone)) {
+            LOG(ERROR, "%s: invalid zone for port %s at pair index %d: '%s'",
+                __func__, port_uuid, pair_idx, zone_str);
+            g_hash_table_destroy(zones_on_host);
+            return NULL;
+        }
+
+        g_hash_table_insert(zones_on_host,
+                            GUINT_TO_POINTER((guint) zone),
                             GINT_TO_POINTER(1));
     }
 
-    LOG(INFO, "%s: Built zones_on_host hashtable: %d unique zones",
-        __func__, g_hash_table_size(ht));
-    return ht;
+    LOG(INFO, "%s: Built zones_on_host hashtable: %d unique zones (from "
+        "%d port/zone pairs)",
+        __func__, g_hash_table_size(zones_on_host), num_pairs);
+    return zones_on_host;
 }
 
 /**

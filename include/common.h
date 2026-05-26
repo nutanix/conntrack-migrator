@@ -92,14 +92,22 @@ create_hashtable_from_zone_and_port_list(const char *zones[],
                                          GHashTable **out_ports);
 
 /**
- * Builds a uint16-keyed hashtable from a strv of decimal zone strings.
+ * Builds a uint16-keyed hashtable from a strv of paired
+ * [port_uuid_0, zone_0, port_uuid_1, zone_1, ...] elements.
  *
- * Used by the zone-mode Clear D-Bus endpoint to translate the "zones
- * still on this host" payload into a hashtable for the delete dump
- * callback to look up against.
+ * Used by the zone-mode Clear D-Bus endpoint to translate the
+ * "(port, zone) pairs still on this host" payload into a hashtable
+ * for the delete dump callback to look up against. The port_uuid half
+ * of each pair is treated as opaque metadata and intentionally
+ * ignored: the zone-mode delete path only filters on CT zone, so
+ * persisting the UUID buys us nothing past the parse step.
+ *
+ * @num_entries must be even; an odd count is a wire-protocol violation
+ * and the function will return NULL after logging.
  */
 GHashTable *
-create_hashtable_from_zone_str_list(const char *zones[], int num_entries);
+create_hashtable_from_port_zone_pairs(const char *port_zone_strv[],
+                                      int num_entries);
 
 struct save_targets *
 save_targets_new_from_ips(GHashTable *ips_to_migrate);
