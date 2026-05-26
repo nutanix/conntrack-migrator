@@ -51,6 +51,64 @@ complete_on_load(VMState1 *object, GDBusMethodInvocation *invocation)
 }
 
 /**
+ * LOAD-time zone rewrite hook.
+ *
+ * For each unmarshalled CT entry, looks up its CT zone in the
+ * (old_zone -> new_zone) map and overwrites ATTR_ZONE in place. Entries
+ * whose old_zone is not in the map are dropped: the source migrated a
+ * zone that the destination wasn't told about, which is a control-plane
+ * mismatch we'd rather log than silently land in the wrong zone.
+ *
+ * Note: only ATTR_ZONE is on the wire (see ct_entry_attr_to_nf_attr in
+ * conntrack_entry.c); the kernel populates orig/repl-zone from this
+ * single value when it inserts the entry.
+ *
+ * Args:
+ *   @ct      pointer to the freshly-unmarshalled nf_conntrack object.
+ *   @targets LOAD targets bundle. NULL is treated as legacy pass-through.
+ *
+ * Returns:
+ *   true  -> proceed with this entry (rewrite applied or pass-through).
+ *   false -> drop this entry; caller must not append it to the batch.
+ */
+static bool
+apply_zone_rewrite(struct nf_conntrack *ct, struct load_targets *targets)
+{
+    uint16_t old_zone, new_zone;
+    gpointer val;
+
+    if (targets == NULL || targets->kind == LOAD_INPUT_LEGACY) {
+        return true;
+    }
+
+    /* Zone-mode LOAD: every entry must carry a CT zone. SAVE-side
+     * validate_ct_entry (Step 2) enforces this, but defend anyway so we
+     * never silently land an unzoned entry in the kernel's default zone. */
+    if (nfct_attr_is_set(ct, ATTR_ZONE) <= 0) {
+        LOG(WARNING, "%s: zone-mode LOAD received entry with no ATTR_ZONE; "
+            "dropping.", __func__);
+        return false;
+    }
+
+    old_zone = nfct_get_attr_u16(ct, ATTR_ZONE);
+
+    val = g_hash_table_lookup(targets->zone_remap,
+                              GUINT_TO_POINTER((guint) old_zone));
+    if (val == NULL) {
+        LOG(WARNING, "%s: old_zone %u not in zone_remap; dropping entry.",
+            __func__, (unsigned) old_zone);
+        return false;
+    }
+    new_zone = (uint16_t) GPOINTER_TO_UINT(val);
+
+    nfct_set_attr_u16(ct, ATTR_ZONE, new_zone);
+
+    LOG(VERBOSE, "%s: rewrote zone %u -> %u",
+        __func__, (unsigned) old_zone, (unsigned) new_zone);
+    return true;
+}
+
+/**
  * IPC endpoint for Load message.
  *
  * This function is called at the destination host where it receives the
@@ -86,6 +144,7 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
         const gchar *arg_data, gpointer user_data)
 {
 
+    struct dbus_targs *targs = user_data;
     GVariant *args, *var;
     gsize size;
     void *payload;
@@ -157,6 +216,14 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
 
         payload += bytes_read;
         total_bytes_read += bytes_read;
+
+        // Apply the LOAD-time zone rewrite (no-op in legacy mode). Entries
+        // whose source zone isn't in zone_remap are dropped here so they
+        // never reach the batch builder.
+        if (!apply_zone_rewrite(ct, targs->load_targets)) {
+            label = NULL;
+            continue;
+        }
 
         curr_batch_offset = mnl_nlmsg_batch_current(batch);
 

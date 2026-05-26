@@ -489,6 +489,69 @@ detect_save_input_kind(int argc, char *argv[])
 }
 
 /**
+ * Decides which LOAD-mode CLI layout we are looking at.
+ *
+ * Legacy LOAD is strictly: `conntrack_migrator 1 <helper_id>` (argc == 3).
+ * New LOAD is:             `conntrack_migrator 1 <helper_id> <N>
+ *                              <port_uuid> <old_ct_zone> <new_ct_zone> ...`
+ *                          (argc == 4 + 3*N).
+ *
+ * Anything else is a hard error - we deliberately do NOT silently fall back
+ * to legacy if the trailing args do not match the new shape.
+ *
+ * NOTE: this lives in the runtime (post-fork) section of the file, above
+ * dmain(), because dmain re-runs the detection after the double fork to
+ * recover the LOAD sub-kind without threading it through a new parameter.
+ * The pre-fork validator block below uses the same function for shape
+ * checking; we deliberately keep one definition shared by both call sites
+ * (mirroring detect_save_input_kind above).
+ *
+ * Args:
+ *   @argc num of CLI arguments.
+ *   @argv array of CLI arguments.
+ *
+ * Returns:
+ *   The detected sub-mode. Aborts the process via errx() on any mismatch.
+ */
+static enum load_input_kind
+detect_load_input_kind(int argc, char *argv[])
+{
+    int n;
+    int remaining;
+
+    if (argc == HELPER_ID_ARG_INDEX + 1) {   /* argc == 3: legacy LOAD */
+        return LOAD_INPUT_LEGACY;
+    }
+
+    if (argc <= ENTRIES_LIST_START_ARG_INDEX) {
+        errx(EXIT_FAILURE,
+             "LOAD mode: trailing args present but no port-zone list. "
+             "Expected `conntrack_migrator 1 <helper_id>` or "
+             "`conntrack_migrator 1 <helper_id> <N> "
+             "<port_uuid> <old_zone> <new_zone> ...`.");
+    }
+
+    n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+    if (n <= 0) {
+        errx(EXIT_FAILURE,
+             "LOAD mode: invalid number of port-zone entries: '%s' "
+             "(must be a positive integer).",
+             argv[NUM_ENTRIES_ARG_INDEX]);
+    }
+
+    remaining = argc - ENTRIES_LIST_START_ARG_INDEX;
+
+    if (remaining == n * LOAD_PORT_ZONE_STRIDE) {
+        return LOAD_INPUT_PORT_ZONES;
+    }
+
+    errx(EXIT_FAILURE,
+         "LOAD mode: argv shape mismatch. N=%d, expected %d args "
+         "(port-zone form), got %d.",
+         n, n * LOAD_PORT_ZONE_STRIDE, remaining);
+}
+
+/**
  * Entry point for the daemon.
  *
  * Args:
@@ -547,9 +610,35 @@ dmain(int argc, char *argv[])
     }
 
     // Start the dbus server
-    dbus_server_args.helper_id = helper_id;
-    dbus_server_args.stop_flag = &stop_flag;
-    dbus_server_args.mode = (enum op_mode) mode;
+    dbus_server_args.helper_id    = helper_id;
+    dbus_server_args.stop_flag    = &stop_flag;
+    dbus_server_args.mode         = (enum op_mode) mode;
+    dbus_server_args.load_targets = NULL;
+
+    /* In LOAD mode build the (old_zone -> new_zone) remap up-front so the
+     * dbus thread has it ready by the time the destination's Load IPC
+     * arrives. SAVE mode leaves load_targets NULL. */
+    if (mode == LOAD_MODE) {
+        enum load_input_kind load_kind = detect_load_input_kind(argc, argv);
+
+        if (load_kind == LOAD_INPUT_LEGACY) {
+            dbus_server_args.load_targets = load_targets_new_ips();
+            LOG(INFO, "%s: LOAD legacy mode (no zone rewrite)", __func__);
+        } else {
+            int n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+            dbus_server_args.load_targets =
+                load_targets_new_from_zone_args(n, argv,
+                                                ENTRIES_LIST_START_ARG_INDEX,
+                                                LOAD_PORT_ZONE_STRIDE);
+            if (dbus_server_args.load_targets == NULL) {
+                LOG(ERROR, "%s: failed to build load_targets", __func__);
+                return EINVAL;
+            }
+            LOG(INFO, "%s: LOAD port-zones mode, %d remap entries",
+                __func__, n);
+        }
+    }
+
     ret = pthread_create(&dbus_server_args.tid,
                          NULL, dbus_server_init,
                          &dbus_server_args);
@@ -595,65 +684,10 @@ dmain(int argc, char *argv[])
 
     pthread_join(dbus_server_args.tid, NULL);
     conntrack_store_destroy(conn_store);
+    load_targets_destroy(dbus_server_args.load_targets);
     close_log();
 
     return 0;
-}
-
-/**
- * Decides which LOAD-mode CLI layout we are looking at.
- *
- * Legacy LOAD is strictly: `conntrack_migrator 1 <helper_id>` (argc == 3).
- * New LOAD is:             `conntrack_migrator 1 <helper_id> <N>
- *                              <port_uuid> <old_ct_zone> <new_ct_zone> ...`
- *                          (argc == 4 + 3*N).
- *
- * Anything else is a hard error - we deliberately do NOT silently fall back
- * to legacy if the trailing args do not match the new shape.
- *
- * Args:
- *   @argc num of CLI arguments.
- *   @argv array of CLI arguments.
- *
- * Returns:
- *   The detected sub-mode. Aborts the process via errx() on any mismatch.
- */
-static enum load_input_kind
-detect_load_input_kind(int argc, char *argv[])
-{
-    int n;
-    int remaining;
-
-    if (argc == HELPER_ID_ARG_INDEX + 1) {   /* argc == 3: legacy LOAD */
-        return LOAD_INPUT_LEGACY;
-    }
-
-    if (argc <= ENTRIES_LIST_START_ARG_INDEX) {
-        errx(EXIT_FAILURE,
-             "LOAD mode: trailing args present but no port-zone list. "
-             "Expected `conntrack_migrator 1 <helper_id>` or "
-             "`conntrack_migrator 1 <helper_id> <N> "
-             "<port_uuid> <old_zone> <new_zone> ...`.");
-    }
-
-    n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
-    if (n <= 0) {
-        errx(EXIT_FAILURE,
-             "LOAD mode: invalid number of port-zone entries: '%s' "
-             "(must be a positive integer).",
-             argv[NUM_ENTRIES_ARG_INDEX]);
-    }
-
-    remaining = argc - ENTRIES_LIST_START_ARG_INDEX;
-
-    if (remaining == n * LOAD_PORT_ZONE_STRIDE) {
-        return LOAD_INPUT_PORT_ZONES;
-    }
-
-    errx(EXIT_FAILURE,
-         "LOAD mode: argv shape mismatch. N=%d, expected %d args "
-         "(port-zone form), got %d.",
-         n, n * LOAD_PORT_ZONE_STRIDE, remaining);
 }
 
 static void

@@ -302,3 +302,117 @@ save_targets_destroy(struct save_targets *targets)
 
     g_free(targets);
 }
+
+/**
+ * Allocates a LOAD targets bundle for the legacy (IP-based) mode.
+ *
+ * Legacy LOAD carries no zone information on the wire and needs no
+ * rewrite, so zone_remap is left NULL. apply_zone_rewrite() in
+ * dbus_server.c short-circuits when kind is LOAD_INPUT_LEGACY.
+ *
+ * Returns:
+ *   pointer to the bundle. Process aborts on allocation failure.
+ */
+struct load_targets *
+load_targets_new_ips(void)
+{
+    struct load_targets *targets;
+
+    targets = g_malloc0(sizeof(*targets));
+    targets->kind       = LOAD_INPUT_LEGACY;
+    targets->zone_remap = NULL;
+    return targets;
+}
+
+/**
+ * Builds the LOAD targets bundle for the new port-zone CLI shape.
+ *
+ * Walks argv at the @stride-strided offsets starting from @start_idx.
+ * The port_uuid column at offset 0 is intentionally ignored: at LOAD
+ * time the only thing each CT entry carries is ATTR_ZONE, so the only
+ * usable pivot is old_zone -> new_zone. UUID well-formedness has
+ * already been validated by check_zone_load_args() in main.c.
+ *
+ * If two entries declare the same old_zone with different new_zones,
+ * the last write wins and a WARNING is logged. The CLI validator can
+ * be tightened later to reject this shape outright.
+ *
+ * Args:
+ *   @n_entries  declared N from argv[NUM_ENTRIES_ARG_INDEX].
+ *   @argv       full argv array.
+ *   @start_idx  index of the first per-entry slot (typically
+ *               ENTRIES_LIST_START_ARG_INDEX).
+ *   @stride     LOAD_PORT_ZONE_STRIDE.
+ *
+ * Returns:
+ *   pointer to the bundle on success, NULL on parse failure (in which
+ *   case any partially-built remap is torn down).
+ */
+struct load_targets *
+load_targets_new_from_zone_args(int n_entries, char *argv[], int start_idx,
+                                int stride)
+{
+    struct load_targets *targets;
+    GHashTable *remap;
+    int i;
+
+    remap = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+    for (i = 0; i < n_entries; i++) {
+        int base = start_idx + (i * stride);
+        const char *old_str = argv[base + 1];
+        const char *new_str = argv[base + 2];
+        uint16_t old_zone, new_zone;
+
+        if (!parse_ct_zone(old_str, &old_zone) ||
+            !parse_ct_zone(new_str, &new_zone)) {
+            LOG(ERROR, "%s: failed to parse zone at entry %d "
+                "(old='%s' new='%s')",
+                __func__, i, old_str, new_str);
+            g_hash_table_destroy(remap);
+            return NULL;
+        }
+
+        if (g_hash_table_contains(remap,
+                                  GUINT_TO_POINTER((guint) old_zone))) {
+            uint16_t existing = (uint16_t) GPOINTER_TO_UINT(
+                g_hash_table_lookup(remap,
+                    GUINT_TO_POINTER((guint) old_zone)));
+            if (existing != new_zone) {
+                LOG(WARNING, "%s: old_zone %u remapped twice "
+                    "(was -> %u, now -> %u). Last write wins.",
+                    __func__, (unsigned) old_zone,
+                    (unsigned) existing, (unsigned) new_zone);
+            }
+        }
+
+        g_hash_table_insert(remap,
+                            GUINT_TO_POINTER((guint) old_zone),
+                            GUINT_TO_POINTER((guint) new_zone));
+    }
+
+    targets = g_malloc0(sizeof(*targets));
+    targets->kind       = LOAD_INPUT_PORT_ZONES;
+    targets->zone_remap = remap;
+    return targets;
+}
+
+/**
+ * Releases a load_targets bundle and the hashtable it owns.
+ *
+ * NULL-tolerant.
+ *
+ * Args:
+ *   @targets pointer to the bundle. May be NULL.
+ */
+void
+load_targets_destroy(struct load_targets *targets)
+{
+    if (targets == NULL) {
+        return;
+    }
+    if (targets->zone_remap != NULL) {
+        g_hash_table_destroy(targets->zone_remap);
+    }
+    g_free(targets);
+}

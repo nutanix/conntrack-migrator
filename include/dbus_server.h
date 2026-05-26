@@ -39,6 +39,7 @@ struct dbus_targs {
     const char *helper_id;   // helper_id used to export the object
     bool *stop_flag;         // flag to stop the thread listening for events
     enum op_mode mode;       // mode of operation LOAD/SAVE
+    struct load_targets *load_targets; // LOAD-only policy bundle. NULL in SAVE.
 };
 
 void *

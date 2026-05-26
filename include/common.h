@@ -52,6 +52,20 @@ struct save_targets {
     GHashTable *ports_to_migrate;
 };
 
+/**
+ * Bundle of LOAD-side migration policy. Tagged union over CLI sub-mode:
+ *   kind == LOAD_INPUT_LEGACY      -> zone_remap is NULL; pass-through.
+ *   kind == LOAD_INPUT_PORT_ZONES  -> zone_remap is uint16->uint16 map,
+ *                                     keyed by old_ct_zone, value is the
+ *                                     new_ct_zone to write before
+ *                                     programming each CT entry.
+ * Owned by load_targets and freed by load_targets_destroy.
+ */
+struct load_targets {
+    enum load_input_kind kind;
+    GHashTable *zone_remap;
+};
+
 GHashTable *
 create_hashtable_from_ip_list(const char *[], int);
 
@@ -75,5 +89,15 @@ save_targets_new_from_zones_and_ports(GHashTable *zones, GHashTable *ports);
 
 void
 save_targets_destroy(struct save_targets *);
+
+struct load_targets *
+load_targets_new_ips(void);
+
+struct load_targets *
+load_targets_new_from_zone_args(int n_entries, char *argv[], int start_idx,
+                                int stride);
+
+void
+load_targets_destroy(struct load_targets *);
 
 #endif /* COMMON_H */
