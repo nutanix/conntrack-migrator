@@ -24,9 +24,10 @@
  * for cleaning up the conntrack entries in source hypervisor upon
  * successful migration.
  *
- * Tagged union over the active SAVE sub-mode:
+ * Real C tagged union over the active SAVE sub-mode:
  *   kind == SAVE_INPUT_IPS         -> ips_migrated / ips_on_host valid.
  *   kind == SAVE_INPUT_PORT_ZONES  -> zones_migrated / zones_on_host valid.
+ * (the two pairs overlay the same memory; only the active arm is set.)
  *
  * Ownership:
  *   - ips_migrated / zones_migrated are aliases into save_targets and must
@@ -37,16 +38,27 @@
  */
 struct ct_delete_args {
     pthread_t tid;             // Represents the thread ID
-    enum save_input_kind kind; // Active SAVE sub-mode; selects which set
-                               // of pointers below is valid.
+    enum save_input_kind kind; // Active SAVE sub-mode; selects which arm
+                               // of the union below is valid.
 
-    /* IP-mode state */
-    GHashTable *ips_migrated;  // IP addresses migrated from this host
-    GHashTable *ips_on_host;   // IP addresses currently on this host
-
-    /* Zone-mode state */
-    GHashTable *zones_migrated; // CT zones migrated from this host
-    GHashTable *zones_on_host;  // CT zones currently owned by ports on this host
+    /* Active sub-mode state. Anonymous outer union forces mutual
+     * exclusion (a SAVE mode is either IP-list-driven or port-zone-
+     * driven, never both), but the inner structs are anonymous so
+     * field access stays flat:
+     *   ct_del_args.ips_migrated, ct_del_args.zones_on_host, etc.
+     */
+    union {
+        /* kind == SAVE_INPUT_IPS */
+        struct {
+            GHashTable *ips_migrated;  // IP addresses migrated from this host
+            GHashTable *ips_on_host;   // IP addresses currently on this host
+        };
+        /* kind == SAVE_INPUT_PORT_ZONES */
+        struct {
+            GHashTable *zones_migrated; // CT zones migrated from this host
+            GHashTable *zones_on_host;  // CT zones currently owned by ports on this host
+        };
+    };
 
     bool clear_called;         // Flag to indicate if clear DBUS IPC is invoked
     pthread_mutex_t mutex;            // mutex for the condition var

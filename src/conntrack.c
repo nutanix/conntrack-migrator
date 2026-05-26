@@ -45,23 +45,32 @@ typedef int (*dump_cb)(enum nf_conntrack_msg_type type,
  * Structure to represent the callback arguments for the dump taken before
  * deleting the conntrack entries.
  *
- * Tagged union over the active SAVE sub-mode (same shape as ct_delete_args):
+ * Real C tagged union over the active SAVE sub-mode (same shape as
+ * ct_delete_args):
  *   kind == SAVE_INPUT_IPS         -> ips_migrated / ips_on_host valid.
  *   kind == SAVE_INPUT_PORT_ZONES  -> zones_migrated / zones_on_host valid.
+ * (the two pairs overlay the same memory; only the active arm is set.)
  *
  * ct_store is the per-pass output: CT entries that survive the filter are
  * stolen into it and later iterated for NFCT_Q_DESTROY.
  */
 struct delete_ct_dump_cb_args {
-    enum save_input_kind kind; // selects which set of pointers below is valid
+    enum save_input_kind kind; // selects which arm of the union below is valid
 
-    /* IP mode */
-    GHashTable *ips_migrated; // IPs for which CT entries have been migrated
-    GHashTable *ips_on_host;  // IPs that are currently present on the host
-
-    /* Zone mode */
-    GHashTable *zones_migrated; // CT zones for which entries have been migrated
-    GHashTable *zones_on_host;  // CT zones currently owned by ports on this host
+    /* Active sub-mode state, mirroring struct ct_delete_args. Anonymous
+     * inner structs keep field access flat (cb_args->ips_migrated etc.). */
+    union {
+        /* kind == SAVE_INPUT_IPS */
+        struct {
+            GHashTable *ips_migrated; // IPs for which CT entries have been migrated
+            GHashTable *ips_on_host;  // IPs that are currently present on the host
+        };
+        /* kind == SAVE_INPUT_PORT_ZONES */
+        struct {
+            GHashTable *zones_migrated; // CT zones for which entries have been migrated
+            GHashTable *zones_on_host;  // CT zones currently owned by ports on this host
+        };
+    };
 
     GHashTable *ct_store;     // CT entries to be deleted
 };
@@ -852,13 +861,23 @@ _delete_ct_entries(struct nfct_handle *handle, struct ct_delete_args *args)
     ct_store = g_hash_table_new_full(g_direct_hash, g_direct_equal,
                                      NULL, ct_destroy_g_wrapper);
 
-    // Take conntrack dump to get the entries to be deleted.
-    cb_args.kind            = args->kind;
-    cb_args.ips_migrated    = args->ips_migrated;
-    cb_args.ips_on_host     = args->ips_on_host;
-    cb_args.zones_migrated  = args->zones_migrated;
-    cb_args.zones_on_host   = args->zones_on_host;
-    cb_args.ct_store        = ct_store;
+    /* Take conntrack dump to get the entries to be deleted. Both
+     * structs now use a tagged union for the per-mode pointers, so
+     * we can only touch the arm selected by @kind. Copying both arms
+     * would (a) silently overwrite the active arm with NULLs from the
+     * inactive arm via the union overlap and (b) lie about ownership. */
+    cb_args.kind     = args->kind;
+    cb_args.ct_store = ct_store;
+    switch (args->kind) {
+    case SAVE_INPUT_IPS:
+        cb_args.ips_migrated = args->ips_migrated;
+        cb_args.ips_on_host  = args->ips_on_host;
+        break;
+    case SAVE_INPUT_PORT_ZONES:
+        cb_args.zones_migrated = args->zones_migrated;
+        cb_args.zones_on_host  = args->zones_on_host;
+        break;
+    }
 
     ret = _conntrack_dump(handle, delete_conntrack_dump_callback, &cb_args);
     if (ret == -1) {

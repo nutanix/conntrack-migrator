@@ -107,10 +107,11 @@ const char *mode_to_string[] = {
 
 struct ct_delete_args ct_del_args = {
     .kind = SAVE_INPUT_IPS,       /* overwritten in start_in_save_mode */
+    /* Only the active union arm is named; the other arm overlays the
+     * same memory and is zero-initialised by the {0} default. Naming
+     * both arms here would trip -Woverride-init. */
     .ips_migrated = NULL,
     .ips_on_host = NULL,
-    .zones_migrated = NULL,
-    .zones_on_host = NULL,
     .clear_called = false,
     .mutex = PTHREAD_MUTEX_INITIALIZER,
     .clear_called_cond = PTHREAD_COND_INITIALIZER

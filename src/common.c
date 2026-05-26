@@ -411,11 +411,19 @@ save_targets_destroy(struct save_targets *targets)
         return;
     }
 
-    if (targets->ips_to_migrate != NULL) {
-        g_hash_table_destroy(targets->ips_to_migrate);
-    }
-    if (targets->zones_to_migrate != NULL) {
-        g_hash_table_destroy(targets->zones_to_migrate);
+    /* The two pointers overlay the same memory now, so checking both
+     * blindly would double-free the active arm. Dispatch on @kind. */
+    switch (targets->kind) {
+    case SAVE_INPUT_IPS:
+        if (targets->ips_to_migrate != NULL) {
+            g_hash_table_destroy(targets->ips_to_migrate);
+        }
+        break;
+    case SAVE_INPUT_PORT_ZONES:
+        if (targets->zones_to_migrate != NULL) {
+            g_hash_table_destroy(targets->zones_to_migrate);
+        }
+        break;
     }
 
     g_free(targets);

@@ -39,15 +39,21 @@ enum load_input_kind {
 };
 
 /**
- * Bundle of SAVE-side migration targets. Tagged union over CLI sub-mode:
- *   kind == SAVE_INPUT_IPS         -> ips_to_migrate is set
- *   kind == SAVE_INPUT_PORT_ZONES  -> zones_to_migrate is set
- * All hashtables are owned by save_targets and freed by save_targets_destroy.
+ * Bundle of SAVE-side migration targets. Real C tagged union over @kind:
+ *   kind == SAVE_INPUT_IPS         -> ips_to_migrate is the active arm.
+ *   kind == SAVE_INPUT_PORT_ZONES  -> zones_to_migrate is the active arm.
+ * The active hashtable is owned by save_targets and freed by
+ * save_targets_destroy (which dispatches on @kind because the two
+ * pointer fields now overlay the same memory). Anonymous union so call
+ * sites can keep using targets->ips_to_migrate / targets->zones_to_migrate
+ * directly.
  */
 struct save_targets {
     enum save_input_kind kind;
-    GHashTable *ips_to_migrate;
-    GHashTable *zones_to_migrate;
+    union {
+        GHashTable *ips_to_migrate;     /* kind == SAVE_INPUT_IPS */
+        GHashTable *zones_to_migrate;   /* kind == SAVE_INPUT_PORT_ZONES */
+    };
 };
 
 /**
