@@ -349,8 +349,7 @@ load_targets_new_ips(void)
  *   case any partially-built remap is torn down).
  */
 struct load_targets *
-load_targets_new_from_zone_args(int n_entries, char *argv[], int start_idx,
-                                int stride)
+load_targets_new_from_zone_args(int n_entries, char *argv[], int start_idx, int stride)
 {
     struct load_targets *targets;
     GHashTable *remap;
