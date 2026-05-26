@@ -84,17 +84,36 @@
 #define MAX_IP_ADDRESSES_SUPPORTED      127
 
 /**
- * Result of CLI parsing - filled by check_args() and consumed by main().
+ * Result of CLI parsing - filled by check_args() pre-fork and consumed
+ * by dmain() post-fork. Threading the parsed result through avoids
+ * re-walking argv inside the daemon: fork() copies the entire address
+ * space (including main's stack frame), so the struct is valid in the
+ * grandchild and is read verbatim.
  *
  * The sub-kind field is a tagged union: the active arm is determined by
  * @mode (SAVE_MODE -> save_kind, LOAD_MODE -> load_kind).
+ *
+ * @num_entries holds the declared entry count from
+ * argv[NUM_ENTRIES_ARG_INDEX] when applicable:
+ *   - SAVE IP-mode "no IPv4 NICs" path  (argc <= 4):  0
+ *   - SAVE IP-mode standard:                          num_ips
+ *   - SAVE port-zone mode:                            N
+ *   - LOAD legacy:                                    0
+ *   - LOAD port-zone mode:                            N
+ * Consumers that legitimately accept 0 (the no-IPv4-NICs path) must
+ * treat 0 as "list absent" rather than "list empty bad".
+ *
+ * num_entries is captured by detect_*_input_kind during its existing
+ * shape-detection parse and propagated up through check_*_mode_args -
+ * check_args does not parse argv[3] a second time.
  */
-struct parsed_cli {
+struct cli_mode_config {
     enum op_mode mode;
     union {
         enum save_input_kind save_kind;
         enum load_input_kind load_kind;
     };
+    int num_entries;
 };
 
 const char *lmct_config_path = "/etc/lmct_config";
@@ -385,25 +404,22 @@ start_in_save_mode(struct save_targets *targets, bool *stop_flag)
 }
 
 /**
- * Creates hashtable of IP addresses from CLI arguments.
+ * Creates the ips_to_migrate hashtable from the legacy SAVE-mode CLI.
  *
  * Args:
- *   @argv array of CLI args.
+ *   @argv    array of CLI args.
+ *   @num_ips declared IP count from cli_mode_config.num_entries
+ *            (already validated by check_ip_save_args pre-fork). May
+ *            legitimately be 0 ("VM has no IPv4 NICs"; see the early
+ *            exit in start_in_save_mode).
  *
  * Returns:
  *   Resulting hashtable containing IP address(uint32_t) as key.
  */
 static GHashTable *
-create_ips_ht_from_args(char *argv[])
+create_ips_ht_from_args(char *argv[], int num_ips)
 {
-    int num_ips;
     GHashTable *ht;
-
-    /* MIN_ACCEPTABLE_VALUE_FOR_NUM_IPS is 0 because the legacy IP form
-     * legitimately accepts num_ips == 0 ("VM has no IPv4 NICs"; see the
-     * early-exit in start_in_save_mode). */
-    ensure_cli_arg_is_int_at_least(argv[NUM_IP_ADDR_ARG_INDEX], &num_ips,
-                                   "num_ips", MIN_ACCEPTABLE_VALUE_FOR_NUM_IPS);
     const char **ips = (const char **)(argv + IP_ADDR_LIST_ARG_INDEX);
 
     ht = create_hashtable_from_ip_list(ips, num_ips);
@@ -426,26 +442,26 @@ create_ips_ht_from_args(char *argv[])
  * create_hashtable_from_zone_list().
  *
  * Args:
- *   @argv array of CLI args.
+ *   @argv      array of CLI args.
+ *   @n_entries declared entry count from cli_mode_config.num_entries
+ *              (already validated by check_zone_save_args pre-fork).
  *
  * Returns:
  *   zones_to_migrate hashtable on success, NULL on failure.
  */
 static GHashTable *
-create_zones_ht_from_args(char *argv[])
+create_zones_ht_from_args(char *argv[], int n_entries)
 {
-    int n_entries;
     int i;
     const char **zones;
     GHashTable *ht;
 
-    ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n_entries,
-                                   "num_entries",
-                                   MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
     zones = g_malloc0(sizeof(*zones) * n_entries);
     for (i = 0; i < n_entries; i++) {
-        int base = ENTRIES_LIST_START_ARG_INDEX + (i * SAVE_PORT_ZONE_STRIDE);
-        zones[i] = argv[base + 1];
+        int port_uuid_index =
+            ENTRIES_LIST_START_ARG_INDEX + (i * SAVE_PORT_ZONE_STRIDE);
+        int zone_index = port_uuid_index + 1;
+        zones[i] = argv[zone_index];
     }
 
     ht = create_hashtable_from_zone_list(zones, n_entries);
@@ -469,37 +485,40 @@ create_zones_ht_from_args(char *argv[])
  * The "no list / N == 0" cases default to SAVE_INPUT_IPS so the existing
  * "VM with no IPv4 NICs" passthrough in start_in_save_mode() stays intact.
  *
- * NOTE: this lives in the runtime (post-fork) section of the file, above
- * dmain(), because dmain re-runs the detection after the double fork to
- * recover the SAVE sub-kind without threading it through a new parameter.
- * The pre-fork validator block below uses the same function for shape
- * checking; we deliberately keep one definition shared by both call sites.
+ * Called once pre-fork from check_save_mode_args(); the detected kind
+ * and declared N are recorded on cli_mode_config and read by dmain()
+ * after the double fork rather than re-detected.
  *
  * Args:
- *   @argc num of CLI arguments.
- *   @argv array of CLI arguments.
+ *   @argc           num of CLI arguments.
+ *   @argv           array of CLI arguments.
+ *   @out_n_entries  output for the declared entry count. Set to 0 on the
+ *                   "no list" shortcut so the caller can record it on
+ *                   cli_mode_config without an extra parse of argv[3].
  *
  * Returns:
  *   The detected sub-mode. Aborts the process via errx() on a shape
  *   mismatch (declared N is non-zero but trailing args fit neither layout).
  */
 static enum save_input_kind
-detect_save_input_kind(int argc, char *argv[])
+detect_save_input_kind(int argc, char *argv[], int *out_n_entries)
 {
     int n;
     int remaining;
 
     if (argc <= ENTRIES_LIST_START_ARG_INDEX) {
+        *out_n_entries = 0;
         return SAVE_INPUT_IPS;
     }
 
     ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n,
                                    "num_entries",
                                    MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
+    *out_n_entries = n;
 
     remaining = argc - ENTRIES_LIST_START_ARG_INDEX;
 
-    if (remaining == n * 1) {
+    if (remaining == n) {
         return SAVE_INPUT_IPS;
     }
     if (remaining == n * SAVE_PORT_ZONE_STRIDE) {
@@ -523,27 +542,29 @@ detect_save_input_kind(int argc, char *argv[])
  * Anything else is a hard error - we deliberately do NOT silently fall back
  * to legacy if the trailing args do not match the new shape.
  *
- * NOTE: this lives in the runtime (post-fork) section of the file, above
- * dmain(), because dmain re-runs the detection after the double fork to
- * recover the LOAD sub-kind without threading it through a new parameter.
- * The pre-fork validator block below uses the same function for shape
- * checking; we deliberately keep one definition shared by both call sites
- * (mirroring detect_save_input_kind above).
+ * Called once pre-fork from check_load_mode_args(); the detected kind
+ * and declared N are recorded on cli_mode_config and read by dmain()
+ * after the double fork rather than re-detected (mirroring
+ * detect_save_input_kind above).
  *
  * Args:
- *   @argc num of CLI arguments.
- *   @argv array of CLI arguments.
+ *   @argc           num of CLI arguments.
+ *   @argv           array of CLI arguments.
+ *   @out_n_entries  output for the declared entry count. Set to 0 on the
+ *                   legacy shortcut so the caller can record it on
+ *                   cli_mode_config without an extra parse of argv[3].
  *
  * Returns:
  *   The detected sub-mode. Aborts the process via errx() on any mismatch.
  */
 static enum load_input_kind
-detect_load_input_kind(int argc, char *argv[])
+detect_load_input_kind(int argc, char *argv[], int *out_n_entries)
 {
     int n;
     int remaining;
 
     if (argc == HELPER_ID_ARG_INDEX + 1) {   /* argc == 3: legacy LOAD */
+        *out_n_entries = 0;
         return LOAD_INPUT_LEGACY;
     }
 
@@ -558,6 +579,7 @@ detect_load_input_kind(int argc, char *argv[])
     ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n,
                                    "LOAD num_entries",
                                    MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
+    *out_n_entries = n;
 
     remaining = argc - ENTRIES_LIST_START_ARG_INDEX;
 
@@ -574,10 +596,9 @@ detect_load_input_kind(int argc, char *argv[])
 /**
  * Checks if the mode passed is either LOAD or SAVE.
  *
- * Defined here (rather than next to the other check_* validators
- * below) because dmain calls it directly after parsing argv[MODE]
- * to defend against an out-of-set mode reaching the post-fork
- * grandchild. check_args() below also calls it pre-fork.
+ * Called once pre-fork from check_args(); an out-of-set mode aborts
+ * the process via errx() before fork happens, so dmain() is guaranteed
+ * to receive a valid cli_mode_config.mode value.
  *
  * Args:
  *   @mode operating mode
@@ -595,17 +616,21 @@ check_mode(int mode)
  * Entry point for the daemon.
  *
  * Args:
- *   @argc num of arguments to the application
- *   @argv string argument list
+ *   @argc num of arguments to the application.
+ *   @argv string argument list.
+ *   @cli  parsed CLI bundle populated by check_args() before the
+ *         daemon was forked. Mode, sub-kind, and num_entries are read
+ *         directly from here instead of re-walking argv. fork() copies
+ *         the entire address space (including the parent's stack frame),
+ *         so the pointer is valid in the grandchild.
  *
  * Returns:
  *   0 if the daemon exits without any error. otherwise the specific error
  *   code is returned.
  */
 static int
-dmain(int argc, char *argv[])
+dmain(int argc, char *argv[], const struct cli_mode_config *cli)
 {
-    int mode;
     const char *helper_id;
     int ret;
     int rc = 0;
@@ -615,23 +640,10 @@ dmain(int argc, char *argv[])
     bool loop_mu_inited = false;
     struct dbus_targs dbus_server_args = {0};
     struct save_targets *save_targets = NULL;
-    enum save_input_kind save_kind = SAVE_INPUT_IPS;
 
-    // Parse the command line arguments. check_mode runs the value-set
-    // check (mode must be 1 or 2); ensure_cli_arg_is_int_at_least only
-    // guarantees mode is a positive int and would happily accept "3".
-    ensure_cli_arg_is_int_at_least(argv[MODE_ARG_INDEX], &mode, "mode",
-                                   MIN_ACCEPTABLE_VALUE_FOR_MODE);
-    check_mode(mode);
+    (void) argc;
+
     helper_id = argv[HELPER_ID_ARG_INDEX];
-
-    // Re-detect the SAVE sub-kind here because we don't currently thread
-    // the parent's parsed_cli through the double fork (CR5 will fix
-    // that). argv is preserved across forks, so detection is cheap and
-    // side-effect-free.
-    if (mode == SAVE_MODE) {
-        save_kind = detect_save_input_kind(argc, argv);
-    }
 
     // Initialise logging at default INFO level.
     ret = init_log(INFO, helper_id);
@@ -646,7 +658,8 @@ dmain(int argc, char *argv[])
     // set the logging level read from config.
     set_log_level(lmct_conf.log_lvl);
 
-    LOG(INFO, "%s: Starting in mode %s", __func__, mode_to_string[mode]);
+    LOG(INFO, "%s: Starting in mode %s", __func__,
+        mode_to_string[cli->mode]);
     LOG(INFO, "%s: dbus address %s", __func__,
         getenv("DBUS_SYSTEM_BUS_ADDRESS"));
     LOG(INFO, "%s: helper id: %s", __func__, helper_id);
@@ -664,7 +677,7 @@ dmain(int argc, char *argv[])
     // Start the dbus server
     dbus_server_args.helper_id    = helper_id;
     dbus_server_args.stop_flag    = &stop_flag;
-    dbus_server_args.mode         = (enum op_mode) mode;
+    dbus_server_args.mode         = cli->mode;
     dbus_server_args.load_targets = NULL;
     dbus_server_args.loop         = NULL;
     dbus_server_args.should_quit  = false;
@@ -679,19 +692,13 @@ dmain(int argc, char *argv[])
     /* In LOAD mode build the (old_zone -> new_zone) remap up-front so the
      * dbus thread has it ready by the time the destination's Load IPC
      * arrives. SAVE mode leaves load_targets NULL. */
-    if (mode == LOAD_MODE) {
-        enum load_input_kind load_kind = detect_load_input_kind(argc, argv);
-
-        if (load_kind == LOAD_INPUT_LEGACY) {
+    if (cli->mode == LOAD_MODE) {
+        if (cli->load_kind == LOAD_INPUT_LEGACY) {
             dbus_server_args.load_targets = load_targets_new_ips();
             LOG(INFO, "%s: LOAD legacy mode (no zone rewrite)", __func__);
         } else {
-            int n;
-            ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n,
-                                           "num_entries",
-                                           MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
             dbus_server_args.load_targets =
-                load_targets_new_from_zone_args(n, argv,
+                load_targets_new_from_zone_args(cli->num_entries, argv,
                                                 ENTRIES_LIST_START_ARG_INDEX,
                                                 LOAD_PORT_ZONE_STRIDE);
             if (dbus_server_args.load_targets == NULL) {
@@ -700,7 +707,7 @@ dmain(int argc, char *argv[])
                 goto cleanup;
             }
             LOG(INFO, "%s: LOAD port-zones mode, %d remap entries",
-                __func__, n);
+                __func__, cli->num_entries);
         }
     }
 
@@ -721,17 +728,18 @@ dmain(int argc, char *argv[])
     }
 
     // Start save mode threads.
-    if (mode == SAVE_MODE) {
-        if (save_kind == SAVE_INPUT_IPS) {
+    if (cli->mode == SAVE_MODE) {
+        if (cli->save_kind == SAVE_INPUT_IPS) {
             GHashTable *ips_to_migrate;
-            ips_to_migrate = create_ips_ht_from_args(argv);
+            ips_to_migrate = create_ips_ht_from_args(argv, cli->num_entries);
             if (ips_to_migrate == NULL) {
                 rc = EINVAL;
                 goto cleanup;
             }
             save_targets = save_targets_new_from_ips(ips_to_migrate);
         } else {
-            GHashTable *zones_ht = create_zones_ht_from_args(argv);
+            GHashTable *zones_ht =
+                create_zones_ht_from_args(argv, cli->num_entries);
             if (zones_ht == NULL) {
                 rc = EINVAL;
                 goto cleanup;
@@ -958,23 +966,30 @@ check_zone_load_args(int argc, char *argv[])
  *
  * Picks IP vs port-zone via detect_save_input_kind() and delegates
  * per-entry validation to the appropriate validator. Reports the
- * detected sub-kind to the caller via @out_kind.
+ * detected sub-kind and the declared entry count to the caller so they
+ * can be recorded on cli_mode_config without an extra argv parse.
  *
  * Args:
- *   @argc     num of arguments.
- *   @argv     array of CLI arguments.
- *   @out_kind output pointer for the detected sub-kind. May be NULL.
+ *   @argc          num of arguments.
+ *   @argv          array of CLI arguments.
+ *   @out_kind      output pointer for the detected sub-kind. May be NULL.
+ *   @out_n_entries output pointer for the declared entry count, captured
+ *                  from detect_save_input_kind's existing parse. May be
+ *                  NULL. 0 on the SAVE-IP "no list" shortcut.
  */
 static void
 check_save_mode_args(int argc, char *argv[],
-                     enum save_input_kind *out_kind)
+                     enum save_input_kind *out_kind,
+                     int *out_n_entries)
 {
-    enum save_input_kind kind = detect_save_input_kind(argc, argv);
+    int n_entries = 0;
+    enum save_input_kind kind =
+        detect_save_input_kind(argc, argv, &n_entries);
 
     if (kind == SAVE_INPUT_IPS) {
         check_ip_save_args(argc, argv);
     } else {
-        if(kind == SAVE_INPUT_PORT_ZONES) {
+        if (kind == SAVE_INPUT_PORT_ZONES) {
             check_zone_save_args(argc, argv);
         } else {
             errx(EXIT_FAILURE, "Invalid save input kind: %d", kind);
@@ -984,6 +999,9 @@ check_save_mode_args(int argc, char *argv[],
     if (out_kind != NULL) {
         *out_kind = kind;
     }
+    if (out_n_entries != NULL) {
+        *out_n_entries = n_entries;
+    }
 }
 
 /**
@@ -991,29 +1009,39 @@ check_save_mode_args(int argc, char *argv[],
  *
  * Legacy LOAD takes no extra args beyond <mode> <helper_id>; the new LOAD
  * port-zone layout is content-validated. Reports the detected sub-kind
- * to the caller via @out_kind.
+ * and the declared entry count to the caller so they can be recorded on
+ * cli_mode_config without an extra argv parse.
  *
  * Args:
- *   @argc     num of arguments.
- *   @argv     array of CLI arguments.
- *   @out_kind output pointer for the detected sub-kind. May be NULL.
+ *   @argc          num of arguments.
+ *   @argv          array of CLI arguments.
+ *   @out_kind      output pointer for the detected sub-kind. May be NULL.
+ *   @out_n_entries output pointer for the declared entry count, captured
+ *                  from detect_load_input_kind's existing parse. May be
+ *                  NULL. 0 on the LOAD legacy shortcut.
  */
 static void
 check_load_mode_args(int argc, char *argv[],
-                     enum load_input_kind *out_kind)
+                     enum load_input_kind *out_kind,
+                     int *out_n_entries)
 {
-    enum load_input_kind kind = detect_load_input_kind(argc, argv);
+    int n_entries = 0;
+    enum load_input_kind kind =
+        detect_load_input_kind(argc, argv, &n_entries);
 
     if (kind == LOAD_INPUT_PORT_ZONES) {
         check_zone_load_args(argc, argv);
-    }else{
-        if(kind != LOAD_INPUT_LEGACY) {
+    } else {
+        if (kind != LOAD_INPUT_LEGACY) {
             errx(EXIT_FAILURE, "Invalid load input kind: %d", kind);
         }
     }
 
     if (out_kind != NULL) {
         *out_kind = kind;
+    }
+    if (out_n_entries != NULL) {
+        *out_n_entries = n_entries;
     }
 }
 
@@ -1036,7 +1064,7 @@ check_load_mode_args(int argc, char *argv[],
  *   @out  output struct populated with the parse result. Must be non-NULL.
  */
 static void
-check_args(int argc, char *argv[], struct parsed_cli *out)
+check_args(int argc, char *argv[], struct cli_mode_config *out)
 {
     int mode;
 
@@ -1051,10 +1079,15 @@ check_args(int argc, char *argv[], struct parsed_cli *out)
     check_mode(mode);
     out->mode = (enum op_mode) mode;
 
+    /* num_entries is populated by the mode-specific dispatcher, which
+     * in turn picks it up from detect_*_input_kind's existing parse -
+     * no second call to ensure_cli_arg_is_int_at_least on argv[3]. */
     if (mode == SAVE_MODE) {
-        check_save_mode_args(argc, argv, &out->save_kind);
+        check_save_mode_args(argc, argv, &out->save_kind,
+                             &out->num_entries);
     } else {
-        check_load_mode_args(argc, argv, &out->load_kind);
+        check_load_mode_args(argc, argv, &out->load_kind,
+                             &out->num_entries);
     }
 }
 
@@ -1085,11 +1118,13 @@ int
 main(int argc, char *argv[])
 {
     int child_pid;
-    struct parsed_cli cli = {0};
+    struct cli_mode_config cli = {0};
 
-    // Validate CLI args + decide IP-vs-zone sub-kind before any forks.
-    // The result is recomputed inside dmain() because the parent's stack
-    // (and thus this `cli`) is gone by the time the grandchild runs.
+    /* Validate CLI args + decide IP-vs-zone sub-kind before any forks.
+     * fork() preserves the parent's address space (copy-on-write of
+     * the entire AS, including this stack frame), so `cli` is still
+     * readable in the grandchild and is passed directly to dmain()
+     * rather than being re-parsed there. */
     check_args(argc, argv, &cli);
 
     // Fork child
@@ -1118,7 +1153,7 @@ main(int argc, char *argv[])
             }
 
             // start the daemon
-            ret = dmain(argc, argv);
+            ret = dmain(argc, argv, &cli);
             exit((ret == 0 ? EXIT_SUCCESS : EXIT_FAILURE));
         } else {
             // Child process
