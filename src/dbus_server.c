@@ -93,9 +93,13 @@ apply_zone_rewrite(struct nf_conntrack *ct, struct load_targets *targets)
 
     old_zone = nfct_get_attr_u16(ct, ATTR_ZONE);
 
-    val = g_hash_table_lookup(targets->zone_remap,
-                              GUINT_TO_POINTER((guint) old_zone));
-    if (val == NULL) {
+    /* _extended distinguishes "key not in map" from "key maps to value
+     * whose GUINT_TO_POINTER is NULL". The latter is a legitimate remap
+     * to zone 0; plain g_hash_table_lookup conflates the two and would
+     * silently drop a valid old_zone -> 0 mapping. */
+    if (!g_hash_table_lookup_extended(targets->zone_remap,
+                                      GUINT_TO_POINTER((guint) old_zone),
+                                      NULL, &val)) {
         LOG(WARNING, "%s: old_zone %u not in zone_remap; dropping entry.",
             __func__, (unsigned) old_zone);
         return false;
@@ -228,8 +232,13 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
 
         curr_batch_offset = mnl_nlmsg_batch_current(batch);
 
-        // Do the programming here
-        append_ct_to_batch(curr_batch_offset, ct, label, seq++);
+        // Do the programming here. If the build failed the partial header
+        // is left in place at curr_batch_offset; skip mnl_nlmsg_batch_next
+        // so the next iteration overwrites it.
+        if (append_ct_to_batch(curr_batch_offset, ct, label, seq++) < 0) {
+            label = NULL;
+            continue;
+        }
         label = NULL;
         // If there is space in batch, add the entry to it
         if (mnl_nlmsg_batch_next(batch)) {
@@ -593,6 +602,26 @@ err:
 }
 
 /**
+ * Asks the dbus thread to exit its main loop gracefully.
+ *
+ * See declaration in dbus_server.h for the full contract.
+ */
+void
+dbus_server_request_quit(struct dbus_targs *targs)
+{
+    if (targs == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&targs->loop_mu);
+    targs->should_quit = true;
+    if (targs->loop != NULL) {
+        g_main_loop_quit(targs->loop);
+    }
+    pthread_mutex_unlock(&targs->loop_mu);
+}
+
+/**
  * Starts the dbus server.
  *
  * This function performs the following tasks:
@@ -610,6 +639,8 @@ void *
 dbus_server_init(void *data)
 {
     guint dbus_id;
+    GMainLoop *local_loop;
+    bool quit_early;
 
     struct dbus_targs *targs = data;
 
@@ -626,7 +657,30 @@ dbus_server_init(void *data)
                 "programming", __func__);
         }
     }
-    loop = g_main_loop_new(NULL, FALSE);
+
+    /* Publish the loop atomically with the should_quit check so any quit
+     * request that arrived while we were still booting is honoured before
+     * we ever enter g_main_loop_run. Mirroring to the file-static `loop`
+     * keeps complete_on_load / complete_on_clear working unchanged. */
+    local_loop = g_main_loop_new(NULL, FALSE);
+    pthread_mutex_lock(&targs->loop_mu);
+    targs->loop = local_loop;
+    loop = local_loop;
+    quit_early = targs->should_quit;
+    pthread_mutex_unlock(&targs->loop_mu);
+
+    if (quit_early) {
+        LOG(INFO, "%s: shutdown requested before loop start; exiting.",
+            __func__);
+        pthread_mutex_lock(&targs->loop_mu);
+        targs->loop = NULL;
+        loop = NULL;
+        pthread_mutex_unlock(&targs->loop_mu);
+        g_main_loop_unref(local_loop);
+        *(targs->stop_flag) = true;
+        return NULL;
+    }
+
     dbus_id = g_bus_own_name(G_BUS_TYPE_SYSTEM,
                              dbus_name,
                              G_BUS_NAME_OWNER_FLAGS_NONE,
@@ -636,9 +690,14 @@ dbus_server_init(void *data)
                              data,
                              NULL);
 
-    g_main_loop_run(loop);
+    g_main_loop_run(local_loop);
     g_bus_unown_name(dbus_id);
-    g_main_loop_unref(loop);
+
+    pthread_mutex_lock(&targs->loop_mu);
+    targs->loop = NULL;
+    loop = NULL;
+    pthread_mutex_unlock(&targs->loop_mu);
+    g_main_loop_unref(local_loop);
 
     // Set the boolean flag to true, so that netlink threads can
     // gracefully exit

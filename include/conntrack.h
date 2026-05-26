@@ -43,7 +43,7 @@ int
 listen_for_conntrack_events(struct mnl_socket *, struct save_targets *,
                             bool, bool *);
 
-void
+int
 append_ct_to_batch(char *, struct nf_conntrack *, uint32_t *, int);
 
 int

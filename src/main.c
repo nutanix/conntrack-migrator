@@ -591,17 +591,23 @@ dmain(int argc, char *argv[])
     int mode;
     const char *helper_id;
     int ret;
+    int rc = 0;
     bool stop_flag = false;
-    struct dbus_targs dbus_server_args;
+    bool log_open = false;
+    bool dbus_started = false;
+    bool loop_mu_inited = false;
+    struct dbus_targs dbus_server_args = {0};
+    struct save_targets *save_targets = NULL;
     enum save_input_kind save_kind = SAVE_INPUT_IPS;
 
     // Parse the command line arguments.
     mode = atoi(argv[MODE_ARG_INDEX]);
     helper_id = argv[HELPER_ID_ARG_INDEX];
 
-    // Re-detect the SAVE sub-kind here because the parent's parsed_cli
-    // lived on a stack frame that is gone after the double fork. argv
-    // is preserved across forks, so detection is cheap and side-effect-free.
+    // Re-detect the SAVE sub-kind here because we don't currently thread
+    // the parent's parsed_cli through the double fork (CR5 will fix
+    // that). argv is preserved across forks, so detection is cheap and
+    // side-effect-free.
     if (mode == SAVE_MODE) {
         save_kind = detect_save_input_kind(argc, argv);
     }
@@ -609,8 +615,9 @@ dmain(int argc, char *argv[])
     // Initialise logging at default INFO level.
     ret = init_log(INFO, helper_id);
     if (ret != 0) {
-        return EAGAIN;
+        return EAGAIN;   // nothing else allocated yet
     }
+    log_open = true;
 
     // Init configs.
     init_lmct_config(lmct_config_path);
@@ -629,7 +636,8 @@ dmain(int argc, char *argv[])
     conn_store = conntrack_store_new();
     if (conn_store == NULL) {
         LOG(ERROR, "%s: connection_store is NULL", __func__);
-        return EAGAIN;
+        rc = EAGAIN;
+        goto cleanup;
     }
 
     // Start the dbus server
@@ -637,6 +645,15 @@ dmain(int argc, char *argv[])
     dbus_server_args.stop_flag    = &stop_flag;
     dbus_server_args.mode         = (enum op_mode) mode;
     dbus_server_args.load_targets = NULL;
+    dbus_server_args.loop         = NULL;
+    dbus_server_args.should_quit  = false;
+    ret = pthread_mutex_init(&dbus_server_args.loop_mu, NULL);
+    if (ret != 0) {
+        LOG(ERROR, "%s: failed to init loop_mu: %s", __func__, strerror(ret));
+        rc = EAGAIN;
+        goto cleanup;
+    }
+    loop_mu_inited = true;
 
     /* In LOAD mode build the (old_zone -> new_zone) remap up-front so the
      * dbus thread has it ready by the time the destination's Load IPC
@@ -655,7 +672,8 @@ dmain(int argc, char *argv[])
                                                 LOAD_PORT_ZONE_STRIDE);
             if (dbus_server_args.load_targets == NULL) {
                 LOG(ERROR, "%s: failed to build load_targets", __func__);
-                return EINVAL;
+                rc = EINVAL;
+                goto cleanup;
             }
             LOG(INFO, "%s: LOAD port-zones mode, %d remap entries",
                 __func__, n);
@@ -668,8 +686,10 @@ dmain(int argc, char *argv[])
     if (ret != 0) {
         LOG(ERROR, "%s: dbus_server thread creation failed. %s", __func__,
             strerror(ret));
-        return EAGAIN;
+        rc = EAGAIN;
+        goto cleanup;
     }
+    dbus_started = true;
     ret = pthread_setname_np(dbus_server_args.tid, "dbus_server");
     if (ret != 0) {
         LOG(WARNING, "%s: Failed to set thread name \"dbus_server\". %s",
@@ -678,39 +698,74 @@ dmain(int argc, char *argv[])
 
     // Start save mode threads.
     if (mode == SAVE_MODE) {
-        struct save_targets *targets;
-
         if (save_kind == SAVE_INPUT_IPS) {
             GHashTable *ips_to_migrate;
             ips_to_migrate = create_ips_ht_from_args(argv);
             if (ips_to_migrate == NULL) {
-                return EINVAL;
+                rc = EINVAL;
+                goto cleanup;
             }
-            targets = save_targets_new_from_ips(ips_to_migrate);
+            save_targets = save_targets_new_from_ips(ips_to_migrate);
         } else {
             GHashTable *zones_ht = NULL;
             GHashTable *ports_ht = NULL;
             zones_ht = create_zones_and_port_ht_from_args(argv, &ports_ht);
             if (zones_ht == NULL) {
-                return EINVAL;
+                rc = EINVAL;
+                goto cleanup;
             }
-            targets = save_targets_new_from_zones_and_ports(zones_ht,
-                                                            ports_ht);
+            save_targets = save_targets_new_from_zones_and_ports(zones_ht,
+                                                                 ports_ht);
         }
 
-        ret = start_in_save_mode(targets, &stop_flag);
-        save_targets_destroy(targets);
+        ret = start_in_save_mode(save_targets, &stop_flag);
         if (ret != 0) {
-            return EAGAIN;
+            rc = EAGAIN;
+            /* start_in_save_mode may have left events threads running
+             * that still reference save_targets (a pre-existing issue
+             * tracked separately). Don't destroy save_targets in that
+             * case -- a small intentional leak on the abnormal-exit
+             * path is preferable to a use-after-free. */
+            save_targets = NULL;
         }
     }
 
-    pthread_join(dbus_server_args.tid, NULL);
-    conntrack_store_destroy(conn_store);
-    load_targets_destroy(dbus_server_args.load_targets);
-    close_log();
+cleanup:
+    /* Tell any still-running events threads to exit. start_in_save_mode
+     * normally joins them itself, but we set this defensively to cover
+     * partial-failure paths that leave the events threads alive. */
+    stop_flag = true;
 
-    return 0;
+    /* Wake the dbus thread on every error path so pthread_join below
+     * doesn't hang waiting for an RPC that will never arrive. On the
+     * normal success path the loop has already quit itself (via
+     * on_save -> ... -> on_clear -> g_main_loop_quit for SAVE, and
+     * on_load -> g_main_loop_quit for LOAD), so request_quit is a no-op
+     * there. */
+    if (dbus_started) {
+        if (rc != 0) {
+            dbus_server_request_quit(&dbus_server_args);
+        }
+        pthread_join(dbus_server_args.tid, NULL);
+    }
+    if (save_targets != NULL) {
+        save_targets_destroy(save_targets);
+    }
+    if (dbus_server_args.load_targets != NULL) {
+        load_targets_destroy(dbus_server_args.load_targets);
+    }
+    if (loop_mu_inited) {
+        pthread_mutex_destroy(&dbus_server_args.loop_mu);
+    }
+    if (conn_store != NULL) {
+        conntrack_store_destroy(conn_store);
+        conn_store = NULL;
+    }
+    if (log_open) {
+        close_log();
+    }
+
+    return rc;
 }
 
 static void

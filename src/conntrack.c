@@ -366,20 +366,21 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
     nfct_nlmsg_parse(nlh, ct);
 
     if (!validate_ct_entry(type, ct, ctx->targets->kind)) {
-        return MNL_CB_OK;
+        goto out;
     }
 
     /* BPF couldn't pre-filter zone-mode events, so do it in-callback. */
     if (ctx->targets->kind == SAVE_INPUT_PORT_ZONES) {
         uint16_t zone = ct_get_migration_zone(ct);
         if (!is_zone_in_hashtable(zone, ctx->targets->zones_to_migrate)) {
-            return MNL_CB_OK;
+            goto out;
         }
     }
 
     update_conntrack_store(conn_store, ct, type, ctx->targets->kind);
-    nfct_destroy(ct);
 
+out:
+    nfct_destroy(ct);
     return MNL_CB_OK;
 }
 
@@ -561,6 +562,12 @@ listen_for_conntrack_events(struct mnl_socket *nl,
  * Also we are using NLM_F_REPLACE flag, which will replace the conntrack
  * entry if already present in the kernel.
  *
+ * On nfct_nlmsg_build failure the partial netlink header is left in the
+ * buffer but no labels are appended; the caller MUST NOT advance the
+ * batch (mnl_nlmsg_batch_next) so the malformed slot gets overwritten by
+ * the next entry. Returning the error makes "knowingly enqueue garbage"
+ * impossible by construction.
+ *
  * Args:
  *   @send_buf buffer to which ct entry is to be appended.
  *   @ct pointer to the conntrack entry to be programmed in CT.
@@ -568,8 +575,10 @@ listen_for_conntrack_events(struct mnl_socket *nl,
  *     in the conntrack entry.
  *   @seq sequence number for ct entry to be used in the batch.
  *
+ * Returns:
+ *   0 on success, -1 if nfct_nlmsg_build failed (caller must drop entry).
  */
-void
+int
 append_ct_to_batch(char *send_buf, struct nf_conntrack *ct,
                    uint32_t *label, int seq)
 {
@@ -592,7 +601,7 @@ append_ct_to_batch(char *send_buf, struct nf_conntrack *ct,
      * clobber those values. */
     if (nfct_attr_is_set(ct, ATTR_REPL_IPV4_SRC) <= 0) {
         nfct_setobjopt(ct, NFCT_SOPT_SETUP_REPLY);
-    }else{
+    } else {
         if (nfct_attr_is_set(ct, ATTR_L3PROTO) > 0) {
             uint8_t l3 = nfct_get_attr_u8(ct, ATTR_L3PROTO);
             nfct_set_attr_u8(ct, ATTR_REPL_L3PROTO, l3);
@@ -602,16 +611,18 @@ append_ct_to_batch(char *send_buf, struct nf_conntrack *ct,
             nfct_set_attr_u8(ct, ATTR_REPL_L4PROTO, l4);
         }
     }
-    
+
     if (nfct_nlmsg_build(nlh, ct) < 0) {
         LOG(ERROR, "%s: seq=%d: nfct_nlmsg_build failed: %s. "
-            "Resulting netlink message is incomplete and the kernel "
-            "will reject it.", __func__, seq, strerror(errno));
+            "Dropping this entry; caller must not advance the batch.",
+            __func__, seq, strerror(errno));
+        return -1;
     }
 
     if (label != NULL) {
         mnl_attr_put(nlh, CTA_LABELS, CT_LABEL_NUM_WORDS * WORD_SIZE, label);
     }
+    return 0;
 }
 
 /**
