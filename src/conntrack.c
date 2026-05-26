@@ -577,8 +577,22 @@ append_ct_to_batch(char *send_buf, struct nf_conntrack *ct,
      * clobber those values. */
     if (nfct_attr_is_set(ct, ATTR_REPL_IPV4_SRC) <= 0) {
         nfct_setobjopt(ct, NFCT_SOPT_SETUP_REPLY);
+    }else{
+        if (nfct_attr_is_set(ct, ATTR_L3PROTO) > 0) {
+            uint8_t l3 = nfct_get_attr_u8(ct, ATTR_L3PROTO);
+            nfct_set_attr_u8(ct, ATTR_REPL_L3PROTO, l3);
+        }
+        if (nfct_attr_is_set(ct, ATTR_L4PROTO) > 0) {
+            uint8_t l4 = nfct_get_attr_u8(ct, ATTR_L4PROTO);
+            nfct_set_attr_u8(ct, ATTR_REPL_L4PROTO, l4);
+        }
     }
-    nfct_nlmsg_build(nlh, ct);
+    
+    if (nfct_nlmsg_build(nlh, ct) < 0) {
+        LOG(ERROR, "%s: seq=%d: nfct_nlmsg_build failed: %s. "
+            "Resulting netlink message is incomplete and the kernel "
+            "will reject it.", __func__, seq, strerror(errno));
+    }
 
     if (label != NULL) {
         mnl_attr_put(nlh, CTA_LABELS, CT_LABEL_NUM_WORDS * WORD_SIZE, label);
