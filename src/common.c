@@ -12,7 +12,9 @@
  */
 
 #include <arpa/inet.h> // For struct in_addr.
+#include <err.h>
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -186,6 +188,43 @@ parse_ct_zone(const char *s, uint16_t *out)
 
     *out = (uint16_t) v;
     return true;
+}
+
+/**
+ * Ensures a CLI argument is an integer >= @min_value.
+ *
+ * See declaration in common.h for the full contract.
+ */
+void
+ensure_cli_arg_is_int_at_least(const char *arg_value, int *out_value,
+                               const char *arg_name, int min_value)
+{
+    char *end;
+    long v;
+
+    if (arg_value == NULL || *arg_value == '\0') {
+        errx(EXIT_FAILURE, "Missing value for '%s'", arg_name);
+    }
+
+    /* Base 10: lock the grammar to decimal so "010" is ten, not octal
+     * eight (which strtol would do with base 0). Value range is
+     * checked separately below; the base only affects how digits are
+     * read, not how big the result can be. */
+    errno = 0;
+    v = strtol(arg_value, &end, 10);
+
+    if (errno != 0 || end == arg_value || *end != '\0') {
+        errx(EXIT_FAILURE,
+             "Invalid value for '%s': '%s' (must be a valid integer)",
+             arg_name, arg_value);
+    }
+    if (v < (long) min_value || v > INT_MAX) {
+        errx(EXIT_FAILURE,
+             "Invalid value for '%s': '%s' (must be in range [%d, %d])",
+             arg_name, arg_value, min_value, INT_MAX);
+    }
+
+    *out_value = (int) v;
 }
 
 /**

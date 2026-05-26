@@ -398,7 +398,11 @@ create_ips_ht_from_args(char *argv[])
     int num_ips;
     GHashTable *ht;
 
-    num_ips = atoi(argv[NUM_IP_ADDR_ARG_INDEX]);
+    /* MIN_ACCEPTABLE_VALUE_FOR_NUM_IPS is 0 because the legacy IP form
+     * legitimately accepts num_ips == 0 ("VM has no IPv4 NICs"; see the
+     * early-exit in start_in_save_mode). */
+    ensure_cli_arg_is_int_at_least(argv[NUM_IP_ADDR_ARG_INDEX], &num_ips,
+                                   "num_ips", MIN_ACCEPTABLE_VALUE_FOR_NUM_IPS);
     const char **ips = (const char **)(argv + IP_ADDR_LIST_ARG_INDEX);
 
     ht = create_hashtable_from_ip_list(ips, num_ips);
@@ -435,7 +439,9 @@ create_zones_and_port_ht_from_args(char *argv[], GHashTable **out_ports)
     const char **port_uuids;
     GHashTable *ht;
 
-    n_entries = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+    ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n_entries,
+                                   "num_entries",
+                                   MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
     zones = g_malloc0(sizeof(*zones) * n_entries);
     port_uuids = g_malloc0(sizeof(*port_uuids) * n_entries);
     for (i = 0; i < n_entries; i++) {
@@ -491,10 +497,9 @@ detect_save_input_kind(int argc, char *argv[])
         return SAVE_INPUT_IPS;
     }
 
-    n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
-    if (n <= 0) {
-        return SAVE_INPUT_IPS;
-    }
+    ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n,
+                                   "num_entries",
+                                   MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
 
     remaining = argc - ENTRIES_LIST_START_ARG_INDEX;
 
@@ -554,13 +559,9 @@ detect_load_input_kind(int argc, char *argv[])
              "<port_uuid> <old_zone> <new_zone> ...`.");
     }
 
-    n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
-    if (n <= 0) {
-        errx(EXIT_FAILURE,
-             "LOAD mode: invalid number of port-zone entries: '%s' "
-             "(must be a positive integer).",
-             argv[NUM_ENTRIES_ARG_INDEX]);
-    }
+    ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n,
+                                   "LOAD num_entries",
+                                   MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
 
     remaining = argc - ENTRIES_LIST_START_ARG_INDEX;
 
@@ -572,6 +573,26 @@ detect_load_input_kind(int argc, char *argv[])
          "LOAD mode: argv shape mismatch. N=%d, expected %d args "
          "(port-zone form), got %d.",
          n, n * LOAD_PORT_ZONE_STRIDE, remaining);
+}
+
+/**
+ * Checks if the mode passed is either LOAD or SAVE.
+ *
+ * Defined here (rather than next to the other check_* validators
+ * below) because dmain calls it directly after parsing argv[MODE]
+ * to defend against an out-of-set mode reaching the post-fork
+ * grandchild. check_args() below also calls it pre-fork.
+ *
+ * Args:
+ *   @mode operating mode
+ */
+static void
+check_mode(int mode)
+{
+    if ((mode != LOAD_MODE) && (mode != SAVE_MODE)) {
+        errx(EXIT_FAILURE, "Incorrect mode passed. Should be 1 (LOAD) or "
+                "2 (SAVE)\n");
+    }
 }
 
 /**
@@ -600,8 +621,12 @@ dmain(int argc, char *argv[])
     struct save_targets *save_targets = NULL;
     enum save_input_kind save_kind = SAVE_INPUT_IPS;
 
-    // Parse the command line arguments.
-    mode = atoi(argv[MODE_ARG_INDEX]);
+    // Parse the command line arguments. check_mode runs the value-set
+    // check (mode must be 1 or 2); ensure_cli_arg_is_int_at_least only
+    // guarantees mode is a positive int and would happily accept "3".
+    ensure_cli_arg_is_int_at_least(argv[MODE_ARG_INDEX], &mode, "mode",
+                                   MIN_ACCEPTABLE_VALUE_FOR_MODE);
+    check_mode(mode);
     helper_id = argv[HELPER_ID_ARG_INDEX];
 
     // Re-detect the SAVE sub-kind here because we don't currently thread
@@ -665,7 +690,10 @@ dmain(int argc, char *argv[])
             dbus_server_args.load_targets = load_targets_new_ips();
             LOG(INFO, "%s: LOAD legacy mode (no zone rewrite)", __func__);
         } else {
-            int n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+            int n;
+            ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n,
+                                           "num_entries",
+                                           MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
             dbus_server_args.load_targets =
                 load_targets_new_from_zone_args(n, argv,
                                                 ENTRIES_LIST_START_ARG_INDEX,
@@ -789,21 +817,6 @@ err_usage(void)
 }
 
 /**
- * Checks if the mode passed is either LOAD or SAVE.
- *
- * Args:
- *   @mode operating mode
- */
-static void
-check_mode(int mode)
-{
-    if ((mode != LOAD_MODE) && (mode != SAVE_MODE)) {
-        errx(EXIT_FAILURE, "Incorrect mode passed. Should be 1 (LOAD) or "
-                "2 (SAVE)\n");
-    }
-}
-
-/**
  * Checks if the DBUS_SYSTEM_BUS_ADDRESS env variable is set.
  */
 static void
@@ -840,9 +853,17 @@ check_ip_save_args(int argc, char *argv[])
         errx(EXIT_FAILURE, "Number of IP addresses not present in args");
     }
 
-    num_ip_addr = atoi(argv[NUM_IP_ADDR_ARG_INDEX]);
-    if (num_ip_addr < 0 || num_ip_addr > (argc - IP_ADDR_LIST_ARG_INDEX)) {
-        errx(EXIT_FAILURE, "Invalid argument for number of IP addresses");
+    /* min_value = 0 (not 1) because num_ip_addr == 0 is the legitimate
+     * "VM has no IPv4 NICs" case. The helper rejects negatives and
+     * non-numeric input; we still need the count-vs-argc check below
+     * to catch "I declared 5 IPs but only passed 2". */
+    ensure_cli_arg_is_int_at_least(argv[NUM_IP_ADDR_ARG_INDEX], &num_ip_addr,
+                                   "num_ips", MIN_ACCEPTABLE_VALUE_FOR_NUM_IPS);
+    if (num_ip_addr > (argc - IP_ADDR_LIST_ARG_INDEX)) {
+        errx(EXIT_FAILURE,
+             "Declared num_ips (%d) exceeds the number of IP addresses "
+             "supplied in argv (%d)",
+             num_ip_addr, argc - IP_ADDR_LIST_ARG_INDEX);
     }
 }
 
@@ -867,9 +888,11 @@ check_zone_save_args(int argc, char *argv[])
     int n;
     int i;
 
-    (void) argc;   /* arity already checked by the detector */
+    (void) argc;
 
-    n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+    ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n,
+                                   "num_entries",
+                                   MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
 
     for (i = 0; i < n; i++) {
         int base = ENTRIES_LIST_START_ARG_INDEX + (i * SAVE_PORT_ZONE_STRIDE);
@@ -908,7 +931,9 @@ check_zone_load_args(int argc, char *argv[])
 
     (void) argc;
 
-    n = atoi(argv[NUM_ENTRIES_ARG_INDEX]);
+    ensure_cli_arg_is_int_at_least(argv[NUM_ENTRIES_ARG_INDEX], &n,
+                                   "num_entries",
+                                   MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
 
     for (i = 0; i < n; i++) {
         int base = ENTRIES_LIST_START_ARG_INDEX + (i * LOAD_PORT_ZONE_STRIDE);
@@ -1028,7 +1053,8 @@ check_args(int argc, char *argv[], struct parsed_cli *out)
 
     check_dbus_address_env();
 
-    mode = atoi(argv[MODE_ARG_INDEX]);
+    ensure_cli_arg_is_int_at_least(argv[MODE_ARG_INDEX], &mode, "mode",
+                                   MIN_ACCEPTABLE_VALUE_FOR_MODE);
     check_mode(mode);
     out->mode = (enum op_mode) mode;
 

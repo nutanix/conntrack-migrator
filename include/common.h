@@ -85,6 +85,69 @@ is_valid_uuid_string(const char *);
 bool
 parse_ct_zone(const char *, uint16_t *);
 
+/**
+ * Per-argument minimum values for ensure_cli_arg_is_int_at_least.
+ *
+ * Each constant names the CLI argument whose lower bound it enforces,
+ * so the call site reads as a domain-level statement instead of a
+ * magic number:
+ *
+ *   ensure_cli_arg_is_int_at_least(argv[MODE_ARG_INDEX], &mode, "mode",
+ *                                  MIN_ACCEPTABLE_VALUE_FOR_MODE);
+ *
+ * Rationale for the values:
+ *   - mode:        valid op-mode IDs start at 1 (the upper bound is
+ *                  separately enforced by check_mode()).
+ *   - num_entries: a zones/targets list of zero entries is not
+ *                  meaningful, so callers require at least one.
+ *   - num_ips:     zero is legitimate — it means "VM has no IPv4
+ *                  NICs" (start_in_save_mode early-exits in that case).
+ */
+#define MIN_ACCEPTABLE_VALUE_FOR_MODE         1
+#define MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES  1
+#define MIN_ACCEPTABLE_VALUE_FOR_NUM_IPS      0
+
+/**
+ * Ensures that a CLI argument string is an integer >= @min_value and
+ * writes the parsed value to *out_value on success.
+ *
+ * Stricter than atoi(): the full string must be a valid decimal
+ * number with no leading/trailing junk. Any of the following triggers
+ * errx(EXIT_FAILURE) with a message that names the offending argument:
+ *   - @arg_value is NULL or empty
+ *   - @arg_value contains non-numeric characters (e.g. "1xyz")
+ *   - @arg_value is less than @min_value or greater than INT_MAX
+ *
+ * The @min_value parameter lets the same helper enforce both
+ * "positive" (min_value = 1, for <N>-of-entries and <mode>) and
+ * "non-negative" (min_value = 0, for the legacy IP form's num_ips
+ * slot where 0 means "VM has no IPv4 NICs"; see the graceful
+ * early-exit in start_in_save_mode). min_value = 1 also subsumes the
+ * "n <= 0 silent fallback" branches that used to live in
+ * detect_save_input_kind.
+ *
+ * Designed for CLI argv slots where every existing caller treated
+ * bad input as a fatal error anyway. Folding the errx() into the
+ * helper avoids many copies of the same exit message and prevents
+ * the atoi() footgun of treating "1xyz" or "" as a successful parse.
+ *
+ * Note: this helper only enforces a lower bound. Value-set checks
+ * (e.g. mode must be 1 or 2) belong in a dedicated validator
+ * (check_mode) called immediately after this one.
+ *
+ * Args:
+ *   @arg_value the raw string from argv.
+ *   @out_value on success, set to the parsed int. Untouched on
+ *              failure (function does not return on failure).
+ *   @arg_name  display name for the argument, used in the error
+ *              message. Must be non-NULL.
+ *   @min_value lowest accepted value (inclusive). Typical values: 1
+ *              for "positive int", 0 for "non-negative int".
+ */
+void
+ensure_cli_arg_is_int_at_least(const char *arg_value, int *out_value,
+                               const char *arg_name, int min_value);
+
 GHashTable *
 create_hashtable_from_zone_and_port_list(const char *zones[],
                                          const char *port_uuids[],
