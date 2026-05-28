@@ -76,6 +76,16 @@ create_hashtable_from_ip_list(const char *ip_list[], int num_ips)
     int i;
     GHashTable *ht;
 
+    if (num_ips < 0) {
+        LOG(ERROR, "%s: negative num_ips (%d)", __func__, num_ips);
+        return NULL;
+    }
+    if (num_ips > 0 && ip_list == NULL) {
+        LOG(ERROR, "%s: num_ips=%d but ip_list is NULL",
+            __func__, num_ips);
+        return NULL;
+    }
+
     ht = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, NULL);
 
     for (i = 0; i < num_ips; i++) {
@@ -251,6 +261,16 @@ create_hashtable_from_zone_list(const char *zones[], int n_entries)
     int i;
     GHashTable *zones_ht;
 
+    if (n_entries < 0) {
+        LOG(ERROR, "%s: negative n_entries (%d)", __func__, n_entries);
+        return NULL;
+    }
+    if (n_entries > 0 && zones == NULL) {
+        LOG(ERROR, "%s: n_entries=%d but zones is NULL",
+            __func__, n_entries);
+        return NULL;
+    }
+
     zones_ht = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     for (i = 0; i < n_entries; i++) {
@@ -303,6 +323,16 @@ create_hashtable_from_port_zone_pairs(const char *port_zone_strv[],
     GHashTable *zones_on_host;
     int num_pairs;
     int pair_idx;
+
+    if (num_entries < 0) {
+        LOG(ERROR, "%s: negative num_entries (%d)", __func__, num_entries);
+        return NULL;
+    }
+    if (num_entries > 0 && port_zone_strv == NULL) {
+        LOG(ERROR, "%s: num_entries=%d but port_zone_strv is NULL",
+            __func__, num_entries);
+        return NULL;
+    }
 
     if (num_entries % 2 != 0) {
         LOG(ERROR, "%s: expected even-length strv (port_uuid, zone) pairs, "
@@ -367,6 +397,12 @@ save_targets_new_from_ips(GHashTable *ips_to_migrate)
 {
     struct save_targets *targets;
 
+    if (ips_to_migrate == NULL) {
+        errx(EXIT_FAILURE,
+             "%s: refusing to allocate IP-mode save_targets with NULL "
+             "ips_to_migrate (programmer error in caller)", __func__);
+    }
+
     targets = g_malloc0(sizeof(*targets));
     targets->kind = SAVE_INPUT_IPS;
     targets->ips_to_migrate = ips_to_migrate;
@@ -389,6 +425,12 @@ struct save_targets *
 save_targets_new_from_zones(GHashTable *zones)
 {
     struct save_targets *targets;
+
+    if (zones == NULL) {
+        errx(EXIT_FAILURE,
+             "%s: refusing to allocate zone-mode save_targets with NULL "
+             "zones (programmer error in caller)", __func__);
+    }
 
     targets = g_malloc0(sizeof(*targets));
     targets->kind = SAVE_INPUT_PORT_ZONES;
@@ -417,11 +459,13 @@ save_targets_destroy(struct save_targets *targets)
     case SAVE_INPUT_IPS:
         if (targets->ips_to_migrate != NULL) {
             g_hash_table_destroy(targets->ips_to_migrate);
+            targets->ips_to_migrate = NULL;
         }
         break;
     case SAVE_INPUT_PORT_ZONES:
         if (targets->zones_to_migrate != NULL) {
             g_hash_table_destroy(targets->zones_to_migrate);
+            targets->zones_to_migrate = NULL;
         }
         break;
     }
@@ -446,7 +490,6 @@ load_targets_new_ips(void)
 
     targets = g_malloc0(sizeof(*targets));
     targets->kind       = LOAD_INPUT_LEGACY;
-    targets->zone_remap = NULL;
     return targets;
 }
 
@@ -480,6 +523,24 @@ load_targets_new_from_zone_args(int n_entries, char *argv[], int start_idx, int 
     struct load_targets *targets;
     GHashTable *remap;
     int i;
+
+    if (n_entries < 0) {
+        LOG(ERROR, "%s: negative n_entries (%d)", __func__, n_entries);
+        return NULL;
+    }
+    if (n_entries > 0 && argv == NULL) {
+        LOG(ERROR, "%s: n_entries=%d but argv is NULL",
+            __func__, n_entries);
+        return NULL;
+    }
+    if (start_idx < 0) {
+        LOG(ERROR, "%s: negative start_idx (%d)", __func__, start_idx);
+        return NULL;
+    }
+    if (stride <= 0) {
+        LOG(ERROR, "%s: non-positive stride (%d)", __func__, stride);
+        return NULL;
+    }
 
     remap = g_hash_table_new(g_direct_hash, g_direct_equal);
 
@@ -538,6 +599,7 @@ load_targets_destroy(struct load_targets *targets)
     }
     if (targets->zone_remap != NULL) {
         g_hash_table_destroy(targets->zone_remap);
+        targets->zone_remap = NULL;
     }
     g_free(targets);
 }

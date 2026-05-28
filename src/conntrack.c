@@ -100,25 +100,41 @@ is_src_or_dst_in_hashtable(struct in_addr *src, struct in_addr *dst,
 }
 
 /**
- * Returns the CT zone we filter on for migration.
+ * Returns the CT zone we filter on for migration via an out-parameter.
  *
- * Prefers ATTR_ZONE, falls back to ATTR_ORIG_ZONE. Caller must have
- * already validated that at least one of them is set (via validate_ct_entry
- * in zone mode).
+ * Prefers ATTR_ZONE, falls back to ATTR_ORIG_ZONE. Returns false (without
+ * touching @out) if neither attribute is set, so callers in hot paths can
+ * distinguish "no zone attribute" from a valid zone value of 0 without
+ * relying on validate_ct_entry having run first.
  *
  * Args:
- *   @ct pointer to the conntrack entry.
+ *   @ct  pointer to the conntrack entry. Must be non-NULL.
+ *   @out output uint16_t (only written on success). Must be non-NULL.
  *
  * Returns:
- *   the migration zone for @ct.
+ *   true if a zone was extracted into *out, false otherwise.
  */
-static uint16_t
-ct_get_migration_zone(struct nf_conntrack *ct)
+static bool
+ct_get_migration_zone(struct nf_conntrack *ct, uint16_t *out)
 {
-    if (nfct_attr_is_set(ct, ATTR_ZONE) > 0) {
-        return nfct_get_attr_u16(ct, ATTR_ZONE);
+    if (ct == NULL) {
+        LOG(ERROR, "%s: ct is NULL", __func__);
+        return false;
     }
-    return nfct_get_attr_u16(ct, ATTR_ORIG_ZONE);
+    if (out == NULL) {
+        LOG(ERROR, "%s: out is NULL", __func__);
+        return false;
+    }
+
+    if (nfct_attr_is_set(ct, ATTR_ZONE) > 0) {
+        *out = nfct_get_attr_u16(ct, ATTR_ZONE);
+        return true;
+    }
+    if (nfct_attr_is_set(ct, ATTR_ORIG_ZONE) > 0) {
+        *out = nfct_get_attr_u16(ct, ATTR_ORIG_ZONE);
+        return true;
+    }
+    return false;
 }
 
 /**
@@ -165,6 +181,11 @@ static bool
 validate_ct_entry(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
                   enum save_input_kind kind)
 {
+    if (ct == NULL) {
+        LOG(ERROR, "%s: ct is NULL", __func__);
+        return false;
+    }
+
     if (nfct_attr_is_set(ct, ATTR_ORIG_IPV4_SRC) <= 0 ||
         nfct_attr_is_set(ct, ATTR_ORIG_IPV4_DST) <= 0) {
         char *buf = g_malloc0(1024);
@@ -226,6 +247,15 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
     struct save_targets *targets;
     struct in_addr *src_addr, *dst_addr;
 
+    if (ct == NULL) {
+        LOG(ERROR, "%s: ct is NULL", __func__);
+        return NFCT_CB_CONTINUE;
+    }
+    if (data == NULL) {
+        LOG(ERROR, "%s: data is NULL", __func__);
+        return NFCT_CB_CONTINUE;
+    }
+
     targets = data;
 
     if (!validate_ct_entry(type, ct, targets->kind)) {
@@ -239,7 +269,12 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
         is_entry_useful = is_src_or_dst_in_hashtable(src_addr, dst_addr,
                                                      targets->ips_to_migrate);
     } else {
-        uint16_t zone = ct_get_migration_zone(ct);
+        uint16_t zone;
+        if (!ct_get_migration_zone(ct, &zone)) {
+            LOG(WARNING, "%s: dump entry has no zone attribute; skipping.",
+                __func__);
+            return NFCT_CB_CONTINUE;
+        }
         is_entry_useful = is_zone_in_hashtable(zone,
                                                targets->zones_to_migrate);
     }
@@ -348,6 +383,15 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
     struct nf_conntrack *ct;
     struct events_cb_ctx *ctx;
 
+    if (nlh == NULL) {
+        LOG(ERROR, "%s: nlh is NULL", __func__);
+        return MNL_CB_OK;
+    }
+    if (data == NULL) {
+        LOG(ERROR, "%s: data is NULL", __func__);
+        return MNL_CB_OK;
+    }
+
     ctx = (struct events_cb_ctx *)data;
     if (*ctx->stop_flag) {
         return MNL_CB_STOP;
@@ -380,7 +424,12 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
 
     /* BPF couldn't pre-filter zone-mode events, so do it in-callback. */
     if (ctx->targets->kind == SAVE_INPUT_PORT_ZONES) {
-        uint16_t zone = ct_get_migration_zone(ct);
+        uint16_t zone;
+        if (!ct_get_migration_zone(ct, &zone)) {
+            LOG(WARNING, "%s: event has no zone attribute; skipping.",
+                __func__);
+            goto out;
+        }
         if (!is_zone_in_hashtable(zone, ctx->targets->zones_to_migrate)) {
             goto out;
         }
@@ -751,6 +800,15 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
     struct delete_ct_dump_cb_args *cb_args;
     bool in_migrated, in_on_host;
 
+    if (ct == NULL) {
+        LOG(ERROR, "%s: ct is NULL", __func__);
+        return NFCT_CB_CONTINUE;
+    }
+    if (data == NULL) {
+        LOG(ERROR, "%s: data is NULL", __func__);
+        return NFCT_CB_CONTINUE;
+    }
+
     cb_args = data;
 
     if (!validate_ct_entry(type, ct, cb_args->kind)) {
@@ -773,7 +831,12 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
         in_on_host  = is_src_or_dst_in_hashtable(src_addr, dst_addr,
                                                  cb_args->ips_on_host);
     } else {   /* SAVE_INPUT_PORT_ZONES */
-        uint16_t zone = ct_get_migration_zone(ct);
+        uint16_t zone;
+        if (!ct_get_migration_zone(ct, &zone)) {
+            LOG(WARNING, "%s: delete-dump entry has no zone attribute; "
+                "skipping.", __func__);
+            return NFCT_CB_CONTINUE;
+        }
 
         in_migrated = is_zone_in_hashtable(zone, cb_args->zones_migrated);
         in_on_host  = (cb_args->zones_on_host != NULL) &&
@@ -781,7 +844,14 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
     }
 
     if (in_migrated && !in_on_host) {
-        uint32_t ct_id = nfct_get_attr_u32(ct, ATTR_ID);
+        uint32_t ct_id;
+
+        if (nfct_attr_is_set(ct, ATTR_ID) <= 0) {
+            LOG(WARNING, "%s: ct entry has no ATTR_ID set; skipping.",
+                __func__);
+            return NFCT_CB_FAILURE;
+        }
+        ct_id = nfct_get_attr_u32(ct, ATTR_ID);
 
         if (ct_id == 0) {
             LOG(WARNING, "%s: ct entry with 0 id received. Skipping.",
@@ -939,6 +1009,11 @@ delete_ct_entries(void *data)
 {
     struct ct_delete_args *ct_del_args;
     struct nfct_handle *h;
+
+    if (data == NULL) {
+        LOG(ERROR, "%s: data is NULL", __func__);
+        return NULL;
+    }
 
     ct_del_args = data;
 

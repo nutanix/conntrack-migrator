@@ -317,6 +317,11 @@ conntrack_entry_from_nf_conntrack(struct nf_conntrack *ct,
     void *offset;
     enum nf_conntrack_attr nf_ct_attr;
 
+    if (ct == NULL) {
+        LOG(ERROR, "%s: ct is NULL", __func__);
+        return NULL;
+    }
+
     // Allocate a new conntrack entry.
     ct_entry = conntrack_entry_new();
 
@@ -442,6 +447,15 @@ get_conntrack_entry_from_update(struct conntrack_entry *ct_entry,
     int data_size;
     int i;
     void *res_offset, *offset;
+
+    if (ct_entry == NULL) {
+        LOG(ERROR, "%s: ct_entry is NULL", __func__);
+        return NULL;
+    }
+    if (ct == NULL) {
+        LOG(ERROR, "%s: ct is NULL", __func__);
+        return NULL;
+    }
 
     res_ct_entry = conntrack_entry_new();
 

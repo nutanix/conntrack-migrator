@@ -151,6 +151,11 @@ pthread_wrapper_ct_events(void *data)
     struct ct_events_targs *targs;
     struct mnl_socket *nl;
 
+    if (data == NULL) {
+        LOG(ERROR, "%s: data is NULL", __func__);
+        return NULL;
+    }
+
     targs = (struct ct_events_targs *) data;
     LOG(INFO, "%s: Starting conntrack events thread. is_src = %d", __func__,
         targs->is_src);
@@ -643,6 +648,11 @@ dmain(int argc, char *argv[], const struct cli_mode_config *cli)
 
     (void) argc;
 
+    if (argv == NULL || cli == NULL) {
+        /* log facility not initialised yet; bail with a distinct rc. */
+        return EINVAL;
+    }
+
     helper_id = argv[HELPER_ID_ARG_INDEX];
 
     // Initialise logging at default INFO level.
@@ -1067,6 +1077,12 @@ static void
 check_args(int argc, char *argv[], struct cli_mode_config *out)
 {
     int mode;
+
+    if (argv == NULL || out == NULL) {
+        errx(EXIT_FAILURE,
+             "%s: argv=%p out=%p (both must be non-NULL)",
+             __func__, (void *)argv, (void *)out);
+    }
 
     if (argc < 3) {
         err_usage();

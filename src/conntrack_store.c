@@ -68,6 +68,7 @@ conntrack_store_destroy(struct conntrack_store *conn_store)
 
     if (conn_store->store != NULL) {
         g_hash_table_destroy(conn_store->store);
+        conn_store->store = NULL;
     }
 
     pthread_mutex_destroy(&conn_store->lock);
@@ -97,6 +98,10 @@ conntrack_store_insert(struct conntrack_store *conn_store,
     uint32_t ct_id;
     struct conntrack_entry *ct_entry;
 
+    if (nfct_attr_is_set(ct, ATTR_ID) <= 0) {
+        LOG(WARNING, "%s: ct has no ATTR_ID; skipping.", __func__);
+        return -1;
+    }
     ct_id = nfct_get_attr_u32(ct, ATTR_ID);
     if (ct_id == 0) {
         LOG(WARNING, "%s: CT with ID = 0 received!", __func__);
@@ -136,7 +141,10 @@ conntrack_store_remove(struct conntrack_store *conn_store,
 {
     uint32_t ct_id;
 
-    ct_id= nfct_get_attr_u32(ct, ATTR_ID);
+    if (nfct_attr_is_set(ct, ATTR_ID) <= 0) {
+        return -1;
+    }
+    ct_id = nfct_get_attr_u32(ct, ATTR_ID);
     if (ct_id == 0) {
         return -1;
     }
@@ -188,6 +196,10 @@ handle_update_event(struct conntrack_store *conn_store,
     struct conntrack_entry *ct_entry;
     struct conntrack_entry *res_ct_entry;
 
+    if (nfct_attr_is_set(ct, ATTR_ID) <= 0) {
+        LOG(WARNING, "%s: ct has no ATTR_ID; skipping.", __func__);
+        return;
+    }
     ct_id = nfct_get_attr_u32(ct, ATTR_ID);
     if (ct_id == 0) {
         LOG(WARNING, "%s: ct entry with 0 id received. Skipping.", __func__);
@@ -258,6 +270,15 @@ update_conntrack_store(struct conntrack_store *conn_store,
                        enum nf_conntrack_msg_type type,
                        enum save_input_kind kind)
 {
+    if (conn_store == NULL) {
+        LOG(ERROR, "%s: conn_store is NULL", __func__);
+        return;
+    }
+    if (ct == NULL) {
+        LOG(ERROR, "%s: ct is NULL", __func__);
+        return;
+    }
+
     switch(type) {
     case NFCT_T_NEW:
         handle_new_event(conn_store, ct, kind);
