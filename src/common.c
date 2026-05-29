@@ -20,11 +20,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <uuid/uuid.h>
+
 #include "common.h"
 #include "log.h"
-
-/* Canonical UUID body length: 8-4-4-4-12 = 36 chars. */
-#define UUID_STRING_LEN 36
 
 /* Required literal prefix for the port-UUID wire form.
  * Full accepted shape is: "port_" + <canonical 8-4-4-4-12 UUID>, total 41
@@ -117,12 +116,11 @@ create_hashtable_from_ip_list(const char *ip_list[], int num_ips)
  * Validates that @s is a port-prefixed UUID string of the form
  * "port_<canonical 8-4-4-4-12 hex UUID>" (total length 41).
  *
- * The "port_" prefix is the wire form supplied by libvirt and is part of
- * the value; this validator rejects bare UUIDs without the prefix. The
- * UUID body is checked structurally only - dashes at offsets 8/13/18/23
- * and hex (case-insensitive) everywhere else. No version/variant bit
- * checks: callers pass canonical UUIDs and we only need to reject
- * obvious junk.
+ * The "port_" prefix is the wire form supplied by libvirt and is part
+ * of the value; this validator rejects bare UUIDs without the prefix.
+ * The UUID body itself is parsed by libuuid's uuid_parse(), which
+ * enforces canonical 8-4-4-4-12 hex form (case-insensitive) - the
+ * de-facto standard parser on the platform.
  *
  * Args:
  *   @s nul-terminated candidate string. May be NULL.
@@ -133,7 +131,7 @@ create_hashtable_from_ip_list(const char *ip_list[], int num_ips)
 bool
 is_valid_uuid_string(const char *s)
 {
-    int i;
+    uuid_t parsed;
 
     if (s == NULL) {
         return false;
@@ -141,29 +139,7 @@ is_valid_uuid_string(const char *s)
     if (strncmp(s, PORT_UUID_PREFIX, PORT_UUID_PREFIX_LEN) != 0) {
         return false;
     }
-    s += PORT_UUID_PREFIX_LEN;
-
-    if (strlen(s) != UUID_STRING_LEN) {
-        return false;
-    }
-
-    for (i = 0; i < UUID_STRING_LEN; i++) {
-        char c = s[i];
-
-        if (i == 8 || i == 13 || i == 18 || i == 23) {
-            if (c != '-') {
-                return false;
-            }
-        } else {
-            bool is_hex = (c >= '0' && c <= '9') ||
-                          (c >= 'a' && c <= 'f') ||
-                          (c >= 'A' && c <= 'F');
-            if (!is_hex) {
-                return false;
-            }
-        }
-    }
-    return true;
+    return uuid_parse(s + PORT_UUID_PREFIX_LEN, parsed) == 0;
 }
 
 /**

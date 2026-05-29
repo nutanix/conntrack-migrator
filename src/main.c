@@ -207,6 +207,90 @@ dump_conntrack(struct save_targets *targets)
 }
 
 /**
+ * Spawn a single ct_events thread with the given is_src flag and
+ * pthread name. On success the thread owns the freshly allocated
+ * struct ct_events_targs and the caller receives it via @out_targs
+ * for later pthread_join + g_free. On failure @*out_targs is left
+ * untouched and the partial allocation is released here.
+ *
+ * Args:
+ *   @targets     SAVE targets bundle threaded down to the events
+ *                callback (read-only over the thread's lifetime).
+ *   @stop_flag   shared stop flag the thread polls for graceful exit.
+ *   @is_src      true for src-filtered BPF (IP mode src thread);
+ *                false for dst-filtered (IP mode dst thread) or for
+ *                the unfiltered zone-mode thread.
+ *   @thread_name pthread_setname_np tag; logged on rename failure.
+ *   @out_targs   output: owning pointer to the thread args bundle.
+ *
+ * Returns:
+ *   0 on success, -1 on pthread_create failure.
+ */
+static int
+create_events_thread(struct save_targets *targets, bool *stop_flag,
+                     bool is_src, const char *thread_name,
+                     struct ct_events_targs **out_targs)
+{
+    struct ct_events_targs *targs;
+    int ret;
+
+    targs = g_malloc0(sizeof(*targs));
+    targs->targets   = targets;
+    targs->stop_flag = stop_flag;
+    targs->is_src    = is_src;
+
+    ret = pthread_create(&targs->tid, NULL, &pthread_wrapper_ct_events, targs);
+    if (ret != 0) {
+        LOG(ERROR, "%s: events thread '%s' creation failed: %s",
+            __func__, thread_name, strerror(ret));
+        g_free(targs);
+        return -1;
+    }
+    ret = pthread_setname_np(targs->tid, thread_name);
+    if (ret != 0) {
+        LOG(WARNING, "%s: failed to set thread name '%s': %s",
+            __func__, thread_name, strerror(ret));
+    }
+
+    *out_targs = targs;
+    return 0;
+}
+
+/**
+ * Spawn the conntrack delete thread.
+ *
+ * Mode-aware via ct_del_args.kind and the migrated-set pointers the
+ * caller has already populated on ct_del_args before this call. The
+ * thread is started in BOTH save sub-modes; its lifetime is what
+ * keeps the DBus main loop responsive to on_clear until the Clear
+ * IPC arrives and complete_on_clear drives g_main_loop_quit. Removing
+ * it for a mode would leave pthread_join in dmain waiting forever.
+ *
+ * Returns:
+ *   0 on success, -1 on pthread_create failure (in which case the
+ *   thread does not exist and ct_del_args.tid is left untouched).
+ */
+static int
+create_delete_thread(void)
+{
+    int ret;
+
+    ret = pthread_create(&ct_del_args.tid, NULL,
+                         &delete_ct_entries, (void *)&ct_del_args);
+    if (ret != 0) {
+        LOG(ERROR, "%s: CT delete thread creation failed: %s",
+            __func__, strerror(ret));
+        return -1;
+    }
+    ret = pthread_setname_np(ct_del_args.tid, "ct_delete");
+    if (ret != 0) {
+        LOG(WARNING, "%s: failed to set thread name 'ct_delete': %s",
+            __func__, strerror(ret));
+    }
+    return 0;
+}
+
+/**
  * Start threads required for save mode of operation.
  *
  * Following things are performed in the save mode:
@@ -239,168 +323,100 @@ dump_conntrack(struct save_targets *targets)
 static int
 start_in_save_mode(struct save_targets *targets, bool *stop_flag)
 {
-    int ret;
-    struct ct_events_targs *src_targs, *dst_targs, *zone_targs;
+    struct ct_events_targs *src_targs  = NULL;
+    struct ct_events_targs *dst_targs  = NULL;
+    struct ct_events_targs *zone_targs = NULL;
+    uint32_t num_entries;
 
+    /* Common: arity + early exits. The "no entries" path is not an
+     * error in either mode (e.g. a VM with no IPv4 NICs in IP mode);
+     * QEMU expects the helper to live for the migration window, so we
+     * just skip starting the worker threads and let the DBus loop run. */
     if (targets->kind == SAVE_INPUT_IPS) {
-        uint32_t num_ips;
-
-        // Start the delete thread.
-        // NOTE: ct_del_args is an extern global variable
-        ct_del_args.kind         = SAVE_INPUT_IPS;
-        ct_del_args.ips_migrated = targets->ips_to_migrate;
-
-        num_ips = g_hash_table_size(targets->ips_to_migrate);
-
-        // This happens in case a VM has no IPv4 NICs attached to it. Thus,
-        // the VM will not have any CT entries present in kernel to migrate.
-        // Also, since QEMU expects helper process to be present during
-        // migration, we do not exit the process completely rather just runs
-        // the dbus server to facilitate the IPC calls.
-        if (num_ips == 0) {
-            LOG(INFO, "%s: Not starting any save mode threads since number "
-                "of IP addresses is 0", __func__);
-            return 0;
-        }
-
-        if (num_ips > MAX_IP_ADDRESSES_SUPPORTED) {
-            LOG(WARNING, "Number of IP addresses exceeds the max limit: %d. "
-                "No Conntrack Migration will be performed.",
-                MAX_IP_ADDRESSES_SUPPORTED);
-            return 0;
-        }
-
-        // Conntrack delete thread.
-        ret = pthread_create(&ct_del_args.tid, NULL,
-                             &delete_ct_entries,
-                             (void *)&ct_del_args);
-        if (ret != 0) {
-            LOG(ERROR, "%s: CT delete thread creation failed. %s", __func__,
-                strerror(ret));
-            return -1;
-        }
-        ret = pthread_setname_np(ct_del_args.tid, "ct_delete");
-        if (ret != 0) {
-            LOG(WARNING, "%s: Failed to set thread name \"ct_delete\": %s",
-                __func__, strerror(ret));
-        }
-
-        // Listen for conntrack events which contains their src IP address
-        // in ips_to_migrate.
-        src_targs = g_malloc0(sizeof(struct ct_events_targs));
-        src_targs->targets = targets;
-        src_targs->stop_flag = stop_flag;
-        src_targs->is_src = true;
-        ret = pthread_create(&src_targs->tid, NULL, &pthread_wrapper_ct_events,
-                             (void *)src_targs);
-        if (ret != 0) {
-            LOG(ERROR, "%s: src events thread creation failed. %s", __func__,
-                strerror(ret));
-            return -1;
-        }
-        ret = pthread_setname_np(src_targs->tid, "ct_events_src");
-        if (ret != 0) {
-            LOG(WARNING, "%s: Failed to set thread name \"ct_events_src\". %s",
-                __func__, strerror(ret));
-        }
-
-        // Listen for conntrack events which contains their dst IP address
-        // in ips_to_migrate.
-        dst_targs = g_malloc0(sizeof(struct ct_events_targs));
-        dst_targs->targets = targets;
-        dst_targs->stop_flag = stop_flag;
-        dst_targs->is_src = false;
-        ret = pthread_create(&dst_targs->tid, NULL,
-                             &pthread_wrapper_ct_events,
-                             (void *)dst_targs);
-        if (ret != 0) {
-            LOG(ERROR, "%s: dst events thread creation failed. %s", __func__,
-                strerror(ret));
-            return -1;
-        }
-        ret = pthread_setname_np(dst_targs->tid, "ct_events_dst");
-        if (ret != 0) {
-            LOG(WARNING, "%s: Failed to set thread name \"ct_events_dst\". %s",
-                __func__, strerror(ret));
-        }
-
-        // Get all the conntrack entries for the given ip address.
-        dump_conntrack(targets);
-
-        // Wait for all the threads to be stopped.
-        pthread_join(src_targs->tid, NULL);
-        pthread_join(dst_targs->tid, NULL);
-        pthread_join(ct_del_args.tid, NULL);
-
-        g_free(src_targs);
-        g_free(dst_targs);
-
+        num_entries = g_hash_table_size(targets->ips_to_migrate);
     } else {
-
-         /* SAVE_INPUT_PORT_ZONES */
-        uint32_t num_zones = g_hash_table_size(targets->zones_to_migrate);
-
-        if (num_zones == 0) {
-            LOG(INFO, "%s: Not starting any save mode threads since number "
-                "of zones is 0", __func__);
-            return 0;
-        }
-
-        // Wire up the delete-thread state for zone mode.
-        // NOTE: ct_del_args is an extern global variable
-        ct_del_args.kind           = SAVE_INPUT_PORT_ZONES;
-        ct_del_args.zones_migrated = targets->zones_to_migrate;
-
-        // Conntrack delete thread (mode-aware: dispatches on
-        // ct_del_args.kind when on_clear wakes it up).
-        ret = pthread_create(&ct_del_args.tid, NULL,
-                             &delete_ct_entries,
-                             (void *)&ct_del_args);
-        if (ret != 0) {
-            LOG(ERROR, "%s: CT delete thread creation failed. %s", __func__,
-                strerror(ret));
-            return -1;
-        }
-        ret = pthread_setname_np(ct_del_args.tid, "ct_delete");
-        if (ret != 0) {
-            LOG(WARNING, "%s: Failed to set thread name \"ct_delete\": %s",
-                __func__, strerror(ret));
-        }
-
-        // BPF can't filter on CT zone, so we don't split src/dst threads.
-        // One unfiltered events thread is enough; the callback does the
-        // zone match in-process.
-        zone_targs = g_malloc0(sizeof(struct ct_events_targs));
-        zone_targs->targets = targets;
-        zone_targs->stop_flag = stop_flag;
-        zone_targs->is_src = false;   /* unused in zone mode */
-        ret = pthread_create(&zone_targs->tid, NULL,
-                             &pthread_wrapper_ct_events,
-                             (void *)zone_targs);
-        if (ret != 0) {
-            LOG(ERROR, "%s: zone events thread creation failed. %s", __func__,
-                strerror(ret));
-            return -1;
-        }
-        ret = pthread_setname_np(zone_targs->tid, "ct_events_zone");
-        if (ret != 0) {
-            LOG(WARNING, "%s: Failed to set thread name \"ct_events_zone\". "
-                "%s", __func__, strerror(ret));
-        }
-
-        // Get all the conntrack entries for the given zones.
-        dump_conntrack(targets);
-
-        // Wait for the events thread, then the delete thread. Same order
-        // as the IP branch above.
-        pthread_join(zone_targs->tid, NULL);
-        pthread_join(ct_del_args.tid, NULL);
-
-        g_free(zone_targs);
-
+        num_entries = g_hash_table_size(targets->zones_to_migrate);
+    }
+    if (num_entries == 0) {
+        LOG(INFO, "%s: No entries to migrate (kind=%s); skipping save "
+            "mode threads", __func__,
+            save_input_kind_to_string(targets->kind));
+        return 0;
+    }
+    /* IP-only: BPF filter cap. Zone mode does in-callback matching so
+     * the per-IP limit does not apply. */
+    if (targets->kind == SAVE_INPUT_IPS &&
+        num_entries > MAX_IP_ADDRESSES_SUPPORTED) {
+        LOG(WARNING, "Number of IP addresses exceeds the max limit: %d. "
+            "No Conntrack Migration will be performed.",
+            MAX_IP_ADDRESSES_SUPPORTED);
+        return 0;
     }
 
+    /* Common: wire up the delete-thread state, then create the thread.
+     * The delete thread is started in BOTH modes; the body of
+     * _delete_ct_entries dispatches on kind when on_clear wakes it up.
+     * NOTE: ct_del_args is an extern global. */
+    ct_del_args.kind = targets->kind;
+    if (targets->kind == SAVE_INPUT_IPS) {
+        ct_del_args.ips_migrated = targets->ips_to_migrate;
+    } else {
+        ct_del_args.zones_migrated = targets->zones_to_migrate;
+    }
+    if (create_delete_thread() != 0) {
+        return -1;
+    }
+
+    /* Mode-specific: create the events thread(s). IP mode runs two
+     * BPF-filtered threads (src + dst). Zone mode runs one unfiltered
+     * thread; the callback handles zone matching in-process because
+     * BPF cannot filter on CT zone. */
+    if (targets->kind == SAVE_INPUT_IPS) {
+        if (create_events_thread(targets, stop_flag, true,
+                                 "ct_events_src", &src_targs) != 0) {
+            goto cleanup_delete_thread;
+        }
+        if (create_events_thread(targets, stop_flag, false,
+                                 "ct_events_dst", &dst_targs) != 0) {
+            goto cleanup_delete_thread;
+        }
+    } else {
+        if (create_events_thread(targets, stop_flag, false,
+                                 "ct_events_zone", &zone_targs) != 0) {
+            goto cleanup_delete_thread;
+        }
+    }
+
+    /* Common: dump live entries, then join events thread(s) + delete
+     * thread in that order so on_clear can drive the shutdown. */
+    dump_conntrack(targets);
+
+    if (targets->kind == SAVE_INPUT_IPS) {
+        pthread_join(src_targs->tid, NULL);
+        pthread_join(dst_targs->tid, NULL);
+        g_free(src_targs);
+        g_free(dst_targs);
+    } else {
+        pthread_join(zone_targs->tid, NULL);
+        g_free(zone_targs);
+    }
+    pthread_join(ct_del_args.tid, NULL);
     return 0;
+
+cleanup_delete_thread:
+    /* Events thread creation failed after the delete thread was
+     * already started. Wake the delete thread with a sentinel clear
+     * so it doesn't block on clear_called_cond forever, join it, then
+     * free any partial events-thread allocations (NULL-safe). */
+    pthread_mutex_lock(&ct_del_args.mutex);
+    ct_del_args.clear_called = true;
+    pthread_cond_signal(&ct_del_args.clear_called_cond);
+    pthread_mutex_unlock(&ct_del_args.mutex);
+    pthread_join(ct_del_args.tid, NULL);
+    g_free(src_targs);
+    g_free(dst_targs);
+    g_free(zone_targs);
+    return -1;
 }
 
 /**
@@ -456,6 +472,17 @@ create_zones_ht_from_args(char *argv[], int n_entries)
     const char **zones;
     GHashTable *ht;
     const int old_zone_offset = 1;
+   
+    if (n_entries <= 0) {
+        LOG(ERROR, "%s: non-positive n_entries (%d)", __func__, n_entries);
+        return NULL;
+    }
+
+    if (argv == NULL) {
+        LOG(ERROR, "%s: argv is NULL", __func__);
+        return NULL;
+    }
+
 
     zones = g_malloc0(sizeof(*zones) * n_entries);
     for (i = 0; i < n_entries; i++) {
@@ -508,6 +535,11 @@ build_zone_remap_from_args(char *argv[], int n_entries)
 
     if (n_entries <= 0) {
         LOG(ERROR, "%s: non-positive n_entries (%d)", __func__, n_entries);
+        return NULL;
+    }
+
+    if (argv == NULL) {
+        LOG(ERROR, "%s: argv is NULL there are no port-zone remap entries", __func__);
         return NULL;
     }
 
@@ -784,6 +816,11 @@ dmain(int argc, char *argv[], const struct cli_mode_config *cli)
                 goto cleanup;
             }
             dbus_server_args.load_targets = load_targets_new_from_remap(remap);
+            if (dbus_server_args.load_targets == NULL) {
+                LOG(ERROR, "%s: failed to create load_targets", __func__);
+                rc = EINVAL;
+                goto cleanup;
+            }
             LOG(INFO, "%s: LOAD port-zones mode, %d remap entries",
                 __func__, cli->num_entries);
         }

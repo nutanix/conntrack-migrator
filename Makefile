@@ -11,6 +11,7 @@ GLIB_LIBS := $(shell pkg-config --libs gio-2.0 glib-2.0 gobject-2.0 gio-unix-2.0
 LDLIBS := -lmnl \
 					-lnetfilter_conntrack \
 					-lpthread \
+					-luuid \
 					$(GLIB_LIBS)
 
 INCLUDE_DIRS := include/ \
