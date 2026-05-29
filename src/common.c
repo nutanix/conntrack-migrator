@@ -474,13 +474,14 @@ load_targets_new_ips(void)
  * (old_zone -> new_zone) remap hashtable.
  *
  * Mirrors save_targets_new_from_zones() on the SAVE side: argv walking
- * lives in main.c (build_zone_remap_from_args), and this function is a
- * pure wrapper that takes ownership of the remap.
+ * lives in main.c (check_zone_load_args, which validates and builds the
+ * remap in one pass during pre-fork CLI checking), and this function is
+ * a pure wrapper that takes ownership of the remap.
  *
  * Args:
- *   @remap  hashtable built by build_zone_remap_from_args(). Must be
- *           non-NULL. Ownership transfers to the returned bundle and
- *           is released by load_targets_destroy().
+ *   @remap  hashtable built by check_zone_load_args(). Must be non-NULL.
+ *           Ownership transfers to the returned bundle and is released
+ *           by load_targets_destroy().
  *
  * Returns:
  *   pointer to the bundle. Process aborts on a NULL @remap (caller

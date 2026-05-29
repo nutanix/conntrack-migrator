@@ -527,8 +527,6 @@ listen_for_conntrack_events(struct mnl_socket *nl,
     int ret = 0;
     int fd;
     char buf[MNL_SOCKET_BUFFER_SIZE];
-    int filter_attach_ret;
-    struct nfct_filter *filter;
     fd_set readfds;  // for select sync IO
     struct timeval tv = {
         .tv_sec = 2,
@@ -543,10 +541,12 @@ listen_for_conntrack_events(struct mnl_socket *nl,
 
     // Attach the IP based filter to the socket. BPF can't filter on CT
     // zone, so zone-mode threads run unfiltered and the callback does the
-    // zone match in-process.
+    // zone match in-process. filter / filter_attach_ret live only inside
+    // this branch -- the zone path never touches them.
     if (targets->kind == SAVE_INPUT_IPS) {
-        filter = create_nfct_filter(targets->ips_to_migrate, is_src_filter);
-        filter_attach_ret = nfct_filter_attach(fd, filter);
+        struct nfct_filter *filter =
+            create_nfct_filter(targets->ips_to_migrate, is_src_filter);
+        int filter_attach_ret = nfct_filter_attach(fd, filter);
         if (filter_attach_ret == -1) {
             LOG(ERROR, "%s: Failed to attach filter to the socket. %s",
                 __func__, strerror(errno));
