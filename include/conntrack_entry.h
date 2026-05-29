@@ -108,11 +108,11 @@ void
 conntrack_entry_destroy_g_wrapper(void *);
 
 struct conntrack_entry *
-conntrack_entry_from_nf_conntrack(struct nf_conntrack *, enum save_input_kind);
+conntrack_entry_from_nf_conntrack(const struct nf_conntrack *, enum save_input_kind);
 
 struct conntrack_entry *
 get_conntrack_entry_from_update(struct conntrack_entry *,
-                                struct nf_conntrack *,
+                                const struct nf_conntrack *,
                                 enum save_input_kind);
 
 bool

@@ -433,10 +433,10 @@ cleanup_delete_thread:
  *   Resulting hashtable containing IP address(uint32_t) as key.
  */
 static GHashTable *
-create_ips_ht_from_args(char *argv[], int num_ips)
+create_ips_ht_from_args(const char *const argv[], int num_ips)
 {
     GHashTable *ht;
-    const char **ips = (const char **)(argv + IP_ADDR_LIST_ARG_INDEX);
+    const char *const *ips = argv + IP_ADDR_LIST_ARG_INDEX;
 
     ht = create_hashtable_from_ip_list(ips, num_ips);
     if (ht == NULL) {
@@ -466,7 +466,7 @@ create_ips_ht_from_args(char *argv[], int num_ips)
  *   zones_to_migrate hashtable on success, NULL on failure.
  */
 static GHashTable *
-create_zones_ht_from_args(char *argv[], int n_entries)
+create_zones_ht_from_args(const char *const argv[], int n_entries)
 {
     int i;
     const char **zones;
@@ -526,7 +526,7 @@ create_zones_ht_from_args(char *argv[], int n_entries)
  *   failure (partially-built remap is torn down before returning).
  */
 static GHashTable *
-build_zone_remap_from_args(char *argv[], int n_entries)
+build_zone_remap_from_args(const char *const argv[], int n_entries)
 {
     GHashTable *remap;
     int i;
@@ -608,7 +608,7 @@ build_zone_remap_from_args(char *argv[], int n_entries)
  *   mismatch (declared N is non-zero but trailing args fit neither layout).
  */
 static enum save_input_kind
-detect_save_input_kind(int argc, char *argv[], int *out_n_entries)
+detect_save_input_kind(int argc, const char *const argv[], int *out_n_entries)
 {
     int n;
     int remaining;
@@ -665,7 +665,7 @@ detect_save_input_kind(int argc, char *argv[], int *out_n_entries)
  *   The detected sub-mode. Aborts the process via errx() on any mismatch.
  */
 static enum load_input_kind
-detect_load_input_kind(int argc, char *argv[], int *out_n_entries)
+detect_load_input_kind(int argc, const char *const argv[], int *out_n_entries)
 {
     int n;
     int remaining;
@@ -736,7 +736,7 @@ check_mode(int mode)
  *   code is returned.
  */
 static int
-dmain(int argc, char *argv[], const struct cli_mode_config *cli)
+dmain(int argc, const char *const argv[], const struct cli_mode_config *cli)
 {
     const char *helper_id;
     int ret;
@@ -961,7 +961,7 @@ check_dbus_address_env(void)
  *   @argv array of CLI arguments.
  */
 static void
-check_ip_save_args(int argc, char *argv[])
+check_ip_save_args(int argc, const char *const argv[])
 {
     int num_ip_addr;
 
@@ -999,7 +999,7 @@ check_ip_save_args(int argc, char *argv[])
  *   @argv array of CLI arguments.
  */
 static void
-check_zone_save_args(int argc, char *argv[])
+check_zone_save_args(int argc, const char *const argv[])
 {
     int n;
     int i;
@@ -1041,7 +1041,7 @@ check_zone_save_args(int argc, char *argv[])
  *   @argv array of CLI arguments.
  */
 static void
-check_zone_load_args(int argc, char *argv[])
+check_zone_load_args(int argc, const char *const argv[])
 {
     int n;
     int i;
@@ -1096,7 +1096,7 @@ check_zone_load_args(int argc, char *argv[])
  *                  NULL. 0 on the SAVE-IP "no list" shortcut.
  */
 static void
-check_save_mode_args(int argc, char *argv[],
+check_save_mode_args(int argc, const char *const argv[],
                      enum save_input_kind *out_kind,
                      int *out_n_entries)
 {
@@ -1139,7 +1139,7 @@ check_save_mode_args(int argc, char *argv[],
  *                  NULL. 0 on the LOAD legacy shortcut.
  */
 static void
-check_load_mode_args(int argc, char *argv[],
+check_load_mode_args(int argc, const char *const argv[],
                      enum load_input_kind *out_kind,
                      int *out_n_entries)
 {
@@ -1182,7 +1182,7 @@ check_load_mode_args(int argc, char *argv[],
  *   @out  output struct populated with the parse result. Must be non-NULL.
  */
 static void
-check_args(int argc, char *argv[], struct cli_mode_config *out)
+check_args(int argc, const char *const argv[], struct cli_mode_config *out)
 {
     int mode;
 
@@ -1249,7 +1249,7 @@ main(int argc, char *argv[])
      * the entire AS, including this stack frame), so `cli` is still
      * readable in the grandchild and is passed directly to dmain()
      * rather than being re-parsed there. */
-    check_args(argc, argv, &cli);
+    check_args(argc, (const char *const *)argv, &cli);
 
     // Fork child
     child_pid = fork();
@@ -1277,7 +1277,7 @@ main(int argc, char *argv[])
             }
 
             // start the daemon
-            ret = dmain(argc, argv, &cli);
+            ret = dmain(argc, (const char *const *)argv, &cli);
             exit((ret == 0 ? EXIT_SUCCESS : EXIT_FAILURE));
         } else {
             // Child process

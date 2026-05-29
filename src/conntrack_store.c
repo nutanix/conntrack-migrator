@@ -92,11 +92,16 @@ conntrack_store_destroy(struct conntrack_store *conn_store)
  */
 static int
 conntrack_store_insert(struct conntrack_store *conn_store,
-                       struct nf_conntrack *ct,
+                       const struct nf_conntrack *ct,
                        enum save_input_kind kind)
 {
     uint32_t ct_id;
     struct conntrack_entry *ct_entry;
+    
+    if (ct == NULL) {
+        LOG(ERROR, "%s: ct is NULL", __func__);
+        return -1;
+    }
 
     if (nfct_attr_is_set(ct, ATTR_ID) <= 0) {
         LOG(WARNING, "%s: ct has no ATTR_ID; skipping.", __func__);
@@ -137,9 +142,14 @@ conntrack_store_insert(struct conntrack_store *conn_store,
  */
 static int
 conntrack_store_remove(struct conntrack_store *conn_store,
-                       struct nf_conntrack *ct)
+                       const struct nf_conntrack *ct)
 {
     uint32_t ct_id;
+    
+    if (conn_store == NULL) {
+        LOG(ERROR, "%s: conn_store is NULL", __func__);
+        return -1;
+    }
 
     if (nfct_attr_is_set(ct, ATTR_ID) <= 0) {
         return -1;
@@ -168,7 +178,7 @@ conntrack_store_remove(struct conntrack_store *conn_store,
  */
 static void
 handle_new_event(struct conntrack_store *conn_store,
-                 struct nf_conntrack *ct,
+                 const struct nf_conntrack *ct,
                  enum save_input_kind kind)
 {
     conntrack_store_insert(conn_store, ct, kind);
@@ -189,7 +199,7 @@ handle_new_event(struct conntrack_store *conn_store,
  */
 static void
 handle_update_event(struct conntrack_store *conn_store,
-                    struct nf_conntrack *ct,
+                    const struct nf_conntrack *ct,
                     enum save_input_kind kind)
 {
     uint32_t ct_id;
@@ -236,7 +246,7 @@ handle_update_event(struct conntrack_store *conn_store,
  */
 static void
 handle_destroy_event(struct conntrack_store *conn_store,
-                     struct nf_conntrack *ct)
+                     const struct nf_conntrack *ct)
 {
     int ret = conntrack_store_remove(conn_store, ct);
     if (ret == -1) {
@@ -266,14 +276,10 @@ handle_destroy_event(struct conntrack_store *conn_store,
  */
 void
 update_conntrack_store(struct conntrack_store *conn_store,
-                       struct nf_conntrack *ct,
+                       const struct nf_conntrack *ct,
                        enum nf_conntrack_msg_type type,
                        enum save_input_kind kind)
 {
-    if (conn_store == NULL) {
-        LOG(ERROR, "%s: conn_store is NULL", __func__);
-        return;
-    }
     if (ct == NULL) {
         LOG(ERROR, "%s: ct is NULL", __func__);
         return;

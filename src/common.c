@@ -70,7 +70,7 @@ save_input_kind_to_string(enum save_input_kind kind)
  *   NULL, in case an invalid IP address is present in the ip_list.
  */
 GHashTable *
-create_hashtable_from_ip_list(const char *ip_list[], int num_ips)
+create_hashtable_from_ip_list(const char *const ip_list[], int num_ips)
 {
     int i;
     GHashTable *ht;
@@ -232,7 +232,7 @@ ensure_cli_arg_is_int_at_least(const char *arg_value, int *out_value,
  *   zones_to_migrate hashtable on success, NULL on failure.
  */
 GHashTable *
-create_hashtable_from_zone_list(const char *zones[], int n_entries)
+create_hashtable_from_zone_list(const char *const zones[], int n_entries)
 {
     int i;
     GHashTable *zones_ht;

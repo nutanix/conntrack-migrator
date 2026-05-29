@@ -115,7 +115,7 @@ is_src_or_dst_in_hashtable(struct in_addr *src, struct in_addr *dst,
  *   true if a zone was extracted into *out, false otherwise.
  */
 static bool
-ct_get_migration_zone(struct nf_conntrack *ct, uint16_t *out)
+ct_get_migration_zone(const struct nf_conntrack *ct, uint16_t *out)
 {
     if (ct == NULL) {
         LOG(ERROR, "%s: ct is NULL", __func__);
@@ -178,7 +178,7 @@ is_zone_in_hashtable(uint16_t zone, GHashTable *ht)
  *   false otherwise
  */
 static bool
-validate_ct_entry(enum nf_conntrack_msg_type type, struct nf_conntrack *ct,
+validate_ct_entry(enum nf_conntrack_msg_type type, const struct nf_conntrack *ct,
                   enum save_input_kind kind)
 {
     if (ct == NULL) {

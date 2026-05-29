@@ -81,7 +81,7 @@ const char *
 save_input_kind_to_string(enum save_input_kind kind);
  
 GHashTable *
-create_hashtable_from_ip_list(const char *[], int);
+create_hashtable_from_ip_list(const char *const [], int);
 
 bool
 is_valid_uuid_string(const char *);
@@ -153,7 +153,7 @@ ensure_cli_arg_is_int_at_least(const char *arg_value, int *out_value,
                                const char *arg_name, int min_value);
 
 GHashTable *
-create_hashtable_from_zone_list(const char *zones[], int n_entries);
+create_hashtable_from_zone_list(const char *const zones[], int n_entries);
 
 /**
  * Builds a uint16-keyed hashtable from a strv of paired

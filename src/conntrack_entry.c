@@ -245,7 +245,7 @@ is_zone_only_slot(int bit_num)
  *         eligible for inclusion.
  */
 static void
-create_bitmap_from_nf_conntrack(struct nf_conntrack *ct, uint32_t *bm,
+create_bitmap_from_nf_conntrack(const struct nf_conntrack *ct, uint32_t *bm,
                                 enum save_input_kind kind)
 {
     int i;
@@ -308,7 +308,7 @@ label_from_nf_bitmask(const struct nfct_bitmask *ct_label)
  *   pointer to the conntrack entry if success, NULL otherwise.
  */
 struct conntrack_entry *
-conntrack_entry_from_nf_conntrack(struct nf_conntrack *ct,
+conntrack_entry_from_nf_conntrack(const struct nf_conntrack *ct,
                                   enum save_input_kind kind)
 {
     struct conntrack_entry *ct_entry;
@@ -388,7 +388,7 @@ err:
  *         to preserve the legacy wire format.
  */
 static void
-apply_or_operation(uint32_t *res_bm, uint32_t *bm, struct nf_conntrack *ct,
+apply_or_operation(uint32_t *res_bm, uint32_t *bm, const struct nf_conntrack *ct,
                    enum save_input_kind kind)
 {
     enum nf_conntrack_attr nf_ct_attr;
@@ -440,7 +440,7 @@ apply_or_operation(uint32_t *res_bm, uint32_t *bm, struct nf_conntrack *ct,
  */
 struct conntrack_entry *
 get_conntrack_entry_from_update(struct conntrack_entry *ct_entry,
-                                struct nf_conntrack *ct,
+                                const struct nf_conntrack *ct,
                                 enum save_input_kind kind)
 {
     struct conntrack_entry *res_ct_entry;

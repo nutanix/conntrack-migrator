@@ -73,7 +73,7 @@ complete_on_load(VMState1 *object, GDBusMethodInvocation *invocation)
  *   false -> drop this entry; caller must not append it to the batch.
  */
 static bool
-apply_zone_rewrite(struct nf_conntrack *ct, struct load_targets *targets)
+apply_zone_rewrite(struct nf_conntrack *ct, const struct load_targets *targets)
 {
     uint16_t old_zone, new_zone;
     gpointer val;
@@ -153,17 +153,9 @@ static gboolean
 on_load(VMState1 *object, GDBusMethodInvocation *invocation,
         const gchar *arg_data, gpointer user_data)
 {
-    struct dbus_targs *targs;
+
+    struct dbus_targs *targs = user_data;
     GVariant *args, *var;
-
-    if (object == NULL || invocation == NULL || user_data == NULL) {
-        LOG(ERROR, "%s: NULL input (object=%p invocation=%p user_data=%p)",
-            __func__, (void *)object, (void *)invocation,
-            (void *)user_data);
-        return FALSE;
-    }
-
-    targs = user_data;
     gsize size;
     void *payload;
     uint32_t payload_size;
@@ -304,18 +296,10 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
 static gboolean
 on_save(VMState1 *object, GDBusMethodInvocation *invocation, gpointer user_data)
 {
-    struct dbus_targs *targs;
-    struct data_template *data_tmpl;
-
-    if (object == NULL || invocation == NULL || user_data == NULL) {
-        LOG(ERROR, "%s: NULL input (object=%p invocation=%p user_data=%p)",
-            __func__, (void *)object, (void *)invocation,
-            (void *)user_data);
-        return FALSE;
-    }
-
     LOG(INFO, "%s: Save start.", __func__);
-    targs = user_data;
+
+    struct dbus_targs *targs = user_data;
+    struct data_template *data_tmpl;
     uint32_t data_size = 0;
     void *buf;
     GVariant *child;
@@ -403,17 +387,9 @@ static gboolean
 on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
                  const gchar *arg_data, gpointer user_data)
 {
-    GVariant *args, *var;
-
-    if (object == NULL || invocation == NULL || user_data == NULL) {
-        LOG(ERROR, "%s: NULL input (object=%p invocation=%p user_data=%p)",
-            __func__, (void *)object, (void *)invocation,
-            (void *)user_data);
-        return FALSE;
-    }
-
     LOG(INFO, "%s: Clear start (kind=%s)", __func__,
         save_input_kind_to_string(ct_del_args.kind));
+    GVariant *args, *var;
     gsize num_entries = 0;
     char **payload;
     GHashTable *ips_on_host   = NULL;
@@ -503,18 +479,10 @@ static void
 on_bus_acquired(GDBusConnection *connection, const gchar *name,
                 gpointer user_data)
 {
-    struct dbus_targs *args;
-
-    if (connection == NULL || name == NULL || user_data == NULL) {
-        LOG(ERROR, "%s: NULL input (connection=%p name=%p user_data=%p)",
-            __func__, (void *)connection, (void *)name, (void *)user_data);
-        return;
-    }
-
     LOG(INFO, "%s: Acquired a message bus connection.", __func__);
 
     manager = g_dbus_object_manager_server_new(manager_export_path);
-    args = user_data;
+    struct dbus_targs *args = user_data;
     VMState1 *vmstate1_obj;
     const gchar *helper_id = args->helper_id;
     vmstate1_obj = vmstate1_skeleton_new();
@@ -567,11 +535,6 @@ static void
 on_name_acquired(GDBusConnection *connection, const gchar *name,
                  gpointer user_data)
 {
-    if (connection == NULL || name == NULL) {
-        LOG(ERROR, "%s: NULL input (connection=%p name=%p)",
-            __func__, (void *)connection, (void *)name);
-        return;
-    }
     LOG(INFO, "%s: Acquired the name %s", __func__, name);
 }
 
@@ -589,11 +552,6 @@ static void
 on_name_lost(GDBusConnection *connection, const gchar *name,
              gpointer user_data)
 {
-    if (connection == NULL || name == NULL) {
-        LOG(ERROR, "%s: NULL input (connection=%p name=%p)",
-            __func__, (void *)connection, (void *)name);
-        return;
-    }
     LOG(WARNING, "%s: Lost the name %s.", __func__, name);
 }
 
@@ -688,14 +646,8 @@ dbus_server_init(void *data)
     guint dbus_id;
     GMainLoop *local_loop;
     bool quit_early;
-    struct dbus_targs *targs;
 
-    if (data == NULL) {
-        LOG(ERROR, "%s: data is NULL", __func__);
-        return NULL;
-    }
-
-    targs = data;
+    struct dbus_targs *targs = data;
 
     // If we are operating in save mode, connect to netlink for CT programming
     if (targs->mode == LOAD_MODE) {
