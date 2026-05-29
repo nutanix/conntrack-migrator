@@ -65,15 +65,16 @@ complete_on_load(VMState1 *object, GDBusMethodInvocation *invocation)
  * single value when it inserts the entry.
  *
  * Args:
- *   @ct      pointer to the freshly-unmarshalled nf_conntrack object.
- *   @targets LOAD targets bundle. NULL is treated as legacy pass-through.
+ *   @ct          pointer to the freshly-unmarshalled nf_conntrack object.
+ *   @load_config LOAD-mode config. NULL is treated as legacy pass-through.
  *
  * Returns:
  *   true  -> proceed with this entry (rewrite applied or pass-through).
  *   false -> drop this entry; caller must not append it to the batch.
  */
 static bool
-apply_zone_rewrite(struct nf_conntrack *ct, const struct load_targets *targets)
+apply_zone_rewrite(struct nf_conntrack *ct,
+                   const struct load_mode_config *load_config)
 {
     uint16_t old_zone, new_zone;
     gpointer val;
@@ -83,7 +84,7 @@ apply_zone_rewrite(struct nf_conntrack *ct, const struct load_targets *targets)
         return false;
     }
 
-    if (targets == NULL || targets->kind == LOAD_INPUT_LEGACY) {
+    if (load_config == NULL || load_config->kind == LOAD_INPUT_LEGACY) {
         return true;
     }
 
@@ -102,10 +103,10 @@ apply_zone_rewrite(struct nf_conntrack *ct, const struct load_targets *targets)
      * whose GUINT_TO_POINTER is NULL". The latter is a legitimate remap
      * to zone 0; plain g_hash_table_lookup conflates the two and would
      * silently drop a valid old_zone -> 0 mapping. */
-    if (!g_hash_table_lookup_extended(targets->zone_remap,
+    if (!g_hash_table_lookup_extended(load_config->src_dst_zone_map,
                                       GUINT_TO_POINTER((guint) old_zone),
                                       NULL, &val)) {
-        LOG(WARNING, "%s: old_zone %u not in zone_remap; dropping entry.",
+        LOG(WARNING, "%s: old_zone %u not in src_dst_zone_map; dropping entry.",
             __func__, (unsigned) old_zone);
         return false;
     }
@@ -228,9 +229,9 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
         total_bytes_read += bytes_read;
 
         // Apply the LOAD-time zone rewrite (no-op in legacy mode). Entries
-        // whose source zone isn't in zone_remap are dropped here so they
-        // never reach the batch builder.
-        if (!apply_zone_rewrite(ct, targs->load_targets)) {
+        // whose source zone isn't in src_dst_zone_map are dropped here so
+        // they never reach the batch builder.
+        if (!apply_zone_rewrite(ct, targs->load_config)) {
             label = NULL;
             continue;
         }

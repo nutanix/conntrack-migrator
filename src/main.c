@@ -118,13 +118,13 @@ struct cli_mode_config {
         enum load_input_kind load_kind;
     };
     int num_entries;
-    /* LOAD-port-zone mode only: (old_zone -> new_zone) remap built in
-     * check_zone_load_args() during pre-fork validation, consumed in
-     * dmain() after the double fork. NULL for SAVE mode and for
-     * LOAD-legacy mode. Ownership transfers to load_targets_new_from_remap();
-     * the wrapped bundle is destroyed by load_targets_destroy() at dmain
-     * cleanup time. */
-    GHashTable *zone_remap;
+    /* LOAD-port-zone mode only: (old_zone -> new_zone) src-to-dst zone
+     * map built in check_zone_load_args() during pre-fork validation,
+     * consumed in dmain() after the double fork. NULL for SAVE mode and
+     * for LOAD-legacy mode. Ownership transfers to
+     * create_load_mode_config_for_port_zone_mode(); the wrapped bundle is
+     * destroyed by destroy_load_mode_config() at dmain cleanup time. */
+    GHashTable *src_dst_zone_map;
 };
  
  const char *lmct_config_path = "/etc/lmct_config";
@@ -164,7 +164,7 @@ struct cli_mode_config {
  
     targs = (struct ct_events_targs *) data;
     LOG(INFO, "%s: Starting conntrack events thread. kind=%s is_src=%d",
-        __func__, save_input_kind_to_string(targs->targets->kind),
+        __func__, save_input_kind_to_string(targs->save_config->kind),
         targs->is_src);
 
     nl = mnl_socket_open(NETLINK_NETFILTER);
@@ -184,73 +184,73 @@ struct cli_mode_config {
          return NULL;
      }
  
-    listen_for_conntrack_events(nl, targs->targets,
+    listen_for_conntrack_events(nl, targs->save_config,
                                 targs->is_src, targs->stop_flag);
     mnl_socket_close(nl);
 
     LOG(INFO, "%s: Finished conntrack events thread. kind=%s is_src=%d",
-        __func__, save_input_kind_to_string(targs->targets->kind),
+        __func__, save_input_kind_to_string(targs->save_config->kind),
         targs->is_src);
 
     return NULL;
 }
  
- /**
-  * Gets all the entries present in the kernel CT table for the given
-  * SAVE migration targets.
-  *
-  * Args:
-  *   @targets SAVE targets bundle (mode-aware) used to filter the required
-  *            CT entries.
-  */
- static void
- dump_conntrack(struct save_targets *targets)
- {
-     struct nfct_handle *handle;
+/**
+ * Gets all the entries present in the kernel CT table for the given
+ * SAVE-mode config.
+ *
+ * Args:
+ *   @save_config SAVE-mode config (mode-aware) used to filter the required
+ *                CT entries.
+ */
+static void
+dump_conntrack(struct save_mode_config *save_config)
+{
+    struct nfct_handle *handle;
+
+    // Set the subscriptions for this handle to 0 since we are going to
+    // explicitly request dump on this socket.
+    handle = nfct_open(CONNTRACK, 0);
+    if (handle == NULL) {
+        LOG(ERROR, "%s: nfct_open failed. %s", __func__, strerror(errno));
+        return;
+    }
+    get_conntrack_dump(handle, save_config);
+    nfct_close(handle);
+}
  
-     // Set the subscriptions for this handle to 0 since we are going to
-     // explicitly request dump on this socket.
-     handle = nfct_open(CONNTRACK, 0);
-     if (handle == NULL) {
-         LOG(ERROR, "%s: nfct_open failed. %s", __func__, strerror(errno));
-         return;
-     }
-     get_conntrack_dump(handle, targets);
-     nfct_close(handle);
- }
- 
- /**
-  * Spawn a single ct_events thread with the given is_src flag and
-  * pthread name. On success the thread owns the freshly allocated
-  * struct ct_events_targs and the caller receives it via @out_targs
-  * for later pthread_join + g_free. On failure @*out_targs is left
-  * untouched and the partial allocation is released here.
-  *
-  * Args:
-  *   @targets     SAVE targets bundle threaded down to the events
-  *                callback (read-only over the thread's lifetime).
-  *   @stop_flag   shared stop flag the thread polls for graceful exit.
-  *   @is_src      true for src-filtered BPF (IP mode src thread);
-  *                false for dst-filtered (IP mode dst thread) or for
-  *                the unfiltered zone-mode thread.
-  *   @thread_name pthread_setname_np tag; logged on rename failure.
-  *   @out_targs   output: owning pointer to the thread args bundle.
-  *
-  * Returns:
-  *   0 on success, -1 on pthread_create failure.
-  */
- static int
- create_events_thread(struct save_targets *targets, bool *stop_flag,
-                      bool is_src, const char *thread_name,
-                      struct ct_events_targs **out_targs)
- {
-     struct ct_events_targs *targs;
-     int ret;
- 
-     targs = g_malloc0(sizeof(*targs));
-     targs->targets   = targets;
-     targs->stop_flag = stop_flag;
-     targs->is_src    = is_src;
+/**
+ * Spawn a single ct_events thread with the given is_src flag and
+ * pthread name. On success the thread owns the freshly allocated
+ * struct ct_events_targs and the caller receives it via @out_targs
+ * for later pthread_join + g_free. On failure @*out_targs is left
+ * untouched and the partial allocation is released here.
+ *
+ * Args:
+ *   @save_config SAVE-mode config threaded down to the events
+ *                callback (read-only over the thread's lifetime).
+ *   @stop_flag   shared stop flag the thread polls for graceful exit.
+ *   @is_src      true for src-filtered BPF (IP mode src thread);
+ *                false for dst-filtered (IP mode dst thread) or for
+ *                the unfiltered zone-mode thread.
+ *   @thread_name pthread_setname_np tag; logged on rename failure.
+ *   @out_targs   output: owning pointer to the thread args bundle.
+ *
+ * Returns:
+ *   0 on success, -1 on pthread_create failure.
+ */
+static int
+create_events_thread(struct save_mode_config *save_config, bool *stop_flag,
+                     bool is_src, const char *thread_name,
+                     struct ct_events_targs **out_targs)
+{
+    struct ct_events_targs *targs;
+    int ret;
+
+    targs = g_malloc0(sizeof(*targs));
+    targs->save_config = save_config;
+    targs->stop_flag   = stop_flag;
+    targs->is_src      = is_src;
  
      ret = pthread_create(&targs->tid, NULL, &pthread_wrapper_ct_events, targs);
      if (ret != 0) {
@@ -325,94 +325,94 @@ struct cli_mode_config {
   * The above workflow is used to maintain a local copy of the CT entries for
   * the VM.
   *
-  * Args:
-  *   @targets SAVE targets bundle (mode-aware) for which CT entries have
-  *            to be migrated.
-  *   @stop_flag flag used by thread to exit after dbus operations.
-  *
-  * Returns:
-  *   0 in case of success, -1 otherwise
-  */
- static int
- start_in_save_mode(struct save_targets *targets, bool *stop_flag)
- {
-     struct ct_events_targs *src_targs  = NULL;
-     struct ct_events_targs *dst_targs  = NULL;
-     struct ct_events_targs *zone_targs = NULL;
-     uint32_t num_entries;
- 
-     /* Common: arity + early exits. The "no entries" path is not an
-      * error in either mode (e.g. a VM with no IPv4 NICs in IP mode);
-      * QEMU expects the helper to live for the migration window, so we
-      * just skip starting the worker threads and let the DBus loop run. */
-     if (targets->kind == SAVE_INPUT_IPS) {
-         num_entries = g_hash_table_size(targets->ips_to_migrate);
-     } else {
-         num_entries = g_hash_table_size(targets->zones_to_migrate);
-     }
-     if (num_entries == 0) {
-         LOG(INFO, "%s: No entries to migrate (kind=%s); skipping save "
-             "mode threads", __func__,
-             save_input_kind_to_string(targets->kind));
-         return 0;
-     }
-     /* IP-only: BPF filter cap. Zone mode does in-callback matching so
-      * the per-IP limit does not apply. */
-     if (targets->kind == SAVE_INPUT_IPS &&
-         num_entries > MAX_IP_ADDRESSES_SUPPORTED) {
-         LOG(WARNING, "Number of IP addresses exceeds the max limit: %d. "
-             "No Conntrack Migration will be performed.",
-             MAX_IP_ADDRESSES_SUPPORTED);
-         return 0;
-     }
- 
-     /* Common: wire up the delete-thread state, then create the thread.
-      * The delete thread is started in BOTH modes; the body of
-      * _delete_ct_entries dispatches on kind when on_clear wakes it up.
-      * NOTE: ct_del_args is an extern global. */
-     ct_del_args.kind = targets->kind;
-     if (targets->kind == SAVE_INPUT_IPS) {
-         ct_del_args.ips_migrated = targets->ips_to_migrate;
-     } else {
-         ct_del_args.zones_migrated = targets->zones_to_migrate;
-     }
-     if (create_delete_thread() != 0) {
-         return -1;
-     }
- 
-     /* Mode-specific: create the events thread(s). IP mode runs two
-      * BPF-filtered threads (src + dst). Zone mode runs one unfiltered
-      * thread; the callback handles zone matching in-process because
-      * BPF cannot filter on CT zone. */
-     if (targets->kind == SAVE_INPUT_IPS) {
-         if (create_events_thread(targets, stop_flag, true,
-                                  "ct_events_src", &src_targs) != 0) {
-             goto cleanup_delete_thread;
-         }
-         if (create_events_thread(targets, stop_flag, false,
-                                  "ct_events_dst", &dst_targs) != 0) {
-             goto cleanup_delete_thread;
-         }
-     } else {
-         if (create_events_thread(targets, stop_flag, false,
-                                  "ct_events_zone", &zone_targs) != 0) {
-             goto cleanup_delete_thread;
-         }
-     }
- 
-     /* Common: dump live entries, then join events thread(s) + delete
-      * thread in that order so on_clear can drive the shutdown. */
-     dump_conntrack(targets);
- 
-     if (targets->kind == SAVE_INPUT_IPS) {
-         pthread_join(src_targs->tid, NULL);
-         pthread_join(dst_targs->tid, NULL);
-         g_free(src_targs);
-         g_free(dst_targs);
-     } else {
-         pthread_join(zone_targs->tid, NULL);
-         g_free(zone_targs);
-     }
+ * Args:
+ *   @save_config SAVE-mode config (mode-aware) for which CT entries have
+ *                to be migrated.
+ *   @stop_flag flag used by thread to exit after dbus operations.
+ *
+ * Returns:
+ *   0 in case of success, -1 otherwise
+ */
+static int
+start_in_save_mode(struct save_mode_config *save_config, bool *stop_flag)
+{
+    struct ct_events_targs *src_targs  = NULL;
+    struct ct_events_targs *dst_targs  = NULL;
+    struct ct_events_targs *zone_targs = NULL;
+    uint32_t num_entries;
+
+    /* Common: arity + early exits. The "no entries" path is not an
+     * error in either mode (e.g. a VM with no IPv4 NICs in IP mode);
+     * QEMU expects the helper to live for the migration window, so we
+     * just skip starting the worker threads and let the DBus loop run. */
+    if (save_config->kind == SAVE_INPUT_IPS) {
+        num_entries = g_hash_table_size(save_config->ips_to_migrate);
+    } else {
+        num_entries = g_hash_table_size(save_config->zones_to_migrate);
+    }
+    if (num_entries == 0) {
+        LOG(INFO, "%s: No entries to migrate (kind=%s); skipping save "
+            "mode threads", __func__,
+            save_input_kind_to_string(save_config->kind));
+        return 0;
+    }
+    /* IP-only: BPF filter cap. Zone mode does in-callback matching so
+     * the per-IP limit does not apply. */
+    if (save_config->kind == SAVE_INPUT_IPS &&
+        num_entries > MAX_IP_ADDRESSES_SUPPORTED) {
+        LOG(WARNING, "Number of IP addresses exceeds the max limit: %d. "
+            "No Conntrack Migration will be performed.",
+            MAX_IP_ADDRESSES_SUPPORTED);
+        return 0;
+    }
+
+    /* Common: wire up the delete-thread state, then create the thread.
+     * The delete thread is started in BOTH modes; the body of
+     * _delete_ct_entries dispatches on kind when on_clear wakes it up.
+     * NOTE: ct_del_args is an extern global. */
+    ct_del_args.kind = save_config->kind;
+    if (save_config->kind == SAVE_INPUT_IPS) {
+        ct_del_args.ips_migrated = save_config->ips_to_migrate;
+    } else {
+        ct_del_args.zones_migrated = save_config->zones_to_migrate;
+    }
+    if (create_delete_thread() != 0) {
+        return -1;
+    }
+
+    /* Mode-specific: create the events thread(s). IP mode runs two
+     * BPF-filtered threads (src + dst). Zone mode runs one unfiltered
+     * thread; the callback handles zone matching in-process because
+     * BPF cannot filter on CT zone. */
+    if (save_config->kind == SAVE_INPUT_IPS) {
+        if (create_events_thread(save_config, stop_flag, true,
+                                 "ct_events_src", &src_targs) != 0) {
+            goto cleanup_delete_thread;
+        }
+        if (create_events_thread(save_config, stop_flag, false,
+                                 "ct_events_dst", &dst_targs) != 0) {
+            goto cleanup_delete_thread;
+        }
+    } else {
+        if (create_events_thread(save_config, stop_flag, false,
+                                 "ct_events_zone", &zone_targs) != 0) {
+            goto cleanup_delete_thread;
+        }
+    }
+
+    /* Common: dump live entries, then join events thread(s) + delete
+     * thread in that order so on_clear can drive the shutdown. */
+    dump_conntrack(save_config);
+
+    if (save_config->kind == SAVE_INPUT_IPS) {
+        pthread_join(src_targs->tid, NULL);
+        pthread_join(dst_targs->tid, NULL);
+        g_free(src_targs);
+        g_free(dst_targs);
+    } else {
+        pthread_join(zone_targs->tid, NULL);
+        g_free(zone_targs);
+    }
      pthread_join(ct_del_args.tid, NULL);
      return 0;
  
@@ -679,8 +679,8 @@ struct cli_mode_config {
      bool log_open = false;
      bool dbus_started = false;
      bool loop_mu_inited = false;
-     struct dbus_targs dbus_server_args = {0};
-     struct save_targets *save_targets = NULL;
+    struct dbus_targs dbus_server_args = {0};
+    struct save_mode_config *save_config = NULL;
  
      (void) argc;
  
@@ -722,9 +722,9 @@ struct cli_mode_config {
      // Start the dbus server
      dbus_server_args.helper_id    = helper_id;
      dbus_server_args.stop_flag    = &stop_flag;
-     dbus_server_args.mode         = cli->mode;
-     dbus_server_args.load_targets = NULL;
-     dbus_server_args.loop         = NULL;
+    dbus_server_args.mode         = cli->mode;
+    dbus_server_args.load_config  = NULL;
+    dbus_server_args.loop         = NULL;
      dbus_server_args.should_quit  = false;
      ret = pthread_mutex_init(&dbus_server_args.loop_mu, NULL);
      if (ret != 0) {
@@ -734,28 +734,29 @@ struct cli_mode_config {
      }
      loop_mu_inited = true;
  
-    /* In LOAD mode wire the dbus thread to the pre-built (old_zone ->
-     * new_zone) remap so it's ready by the time the destination's Load
-     * IPC arrives. The remap was built and validated pre-fork in
-     * check_zone_load_args() and rides through fork() in cli->zone_remap
-     * via COW of the parent's address space. SAVE mode and LOAD-legacy
-     * mode leave zone_remap NULL. */
-    if (cli->mode == LOAD_MODE) {
-        if (cli->load_kind == LOAD_INPUT_LEGACY) {
-            dbus_server_args.load_targets = load_targets_new_ips();
-            LOG(INFO, "%s: LOAD legacy mode (no zone rewrite)", __func__);
-        } else {
-            dbus_server_args.load_targets =
-                load_targets_new_from_remap(cli->zone_remap);
-            if (dbus_server_args.load_targets == NULL) {
-                LOG(ERROR, "%s: failed to create load_targets", __func__);
-                rc = EINVAL;
-                goto cleanup;
-            }
-            LOG(INFO, "%s: LOAD port-zones mode, %d remap entries",
-                __func__, cli->num_entries);
-        }
-    }
+   /* In LOAD mode wire the dbus thread to the pre-built (old_zone ->
+    * new_zone) src-to-dst zone map so it's ready by the time the
+    * destination's Load IPC arrives. The map was built and validated
+    * pre-fork in check_zone_load_args() and rides through fork() in
+    * cli->src_dst_zone_map via COW of the parent's address space.
+    * SAVE mode and LOAD-legacy mode leave src_dst_zone_map NULL. */
+   if (cli->mode == LOAD_MODE) {
+       if (cli->load_kind == LOAD_INPUT_LEGACY) {
+           dbus_server_args.load_config =
+               create_load_mode_config_for_legacy_mode();
+           LOG(INFO, "%s: LOAD legacy mode (no zone rewrite)", __func__);
+       } else {
+           dbus_server_args.load_config =
+               create_load_mode_config_for_port_zone_mode(cli->src_dst_zone_map);
+           if (dbus_server_args.load_config == NULL) {
+               LOG(ERROR, "%s: failed to create load_config", __func__);
+               rc = EINVAL;
+               goto cleanup;
+           }
+           LOG(INFO, "%s: LOAD port-zones mode, %d src-to-dst zone map entries",
+               __func__, cli->num_entries);
+       }
+   }
  
      ret = pthread_create(&dbus_server_args.tid,
                           NULL, dbus_server_init,
@@ -773,37 +774,37 @@ struct cli_mode_config {
              __func__, strerror(ret));
      }
  
-     // Start save mode threads.
-     if (cli->mode == SAVE_MODE) {
-         if (cli->save_kind == SAVE_INPUT_IPS) {
-             GHashTable *ips_to_migrate;
-             ips_to_migrate = create_ips_ht_from_args(argv, cli->num_entries);
-             if (ips_to_migrate == NULL) {
-                 rc = EINVAL;
-                 goto cleanup;
-             }
-             save_targets = save_targets_new_from_ips(ips_to_migrate);
-         } else {
-             GHashTable *zones_ht =
-                 create_zones_ht_from_args(argv, cli->num_entries);
-             if (zones_ht == NULL) {
-                 rc = EINVAL;
-                 goto cleanup;
-             }
-             save_targets = save_targets_new_from_zones(zones_ht);
-         }
- 
-         ret = start_in_save_mode(save_targets, &stop_flag);
-         if (ret != 0) {
-             rc = EAGAIN;
-             /* start_in_save_mode may have left events threads running
-              * that still reference save_targets (a pre-existing issue
-              * tracked separately). Don't destroy save_targets in that
-              * case -- a small intentional leak on the abnormal-exit
-              * path is preferable to a use-after-free. */
-             save_targets = NULL;
-         }
-     }
+    // Start save mode threads.
+    if (cli->mode == SAVE_MODE) {
+        if (cli->save_kind == SAVE_INPUT_IPS) {
+            GHashTable *ips_to_migrate;
+            ips_to_migrate = create_ips_ht_from_args(argv, cli->num_entries);
+            if (ips_to_migrate == NULL) {
+                rc = EINVAL;
+                goto cleanup;
+            }
+            save_config = create_save_mode_config_for_ip_mode(ips_to_migrate);
+        } else {
+            GHashTable *zones_ht =
+                create_zones_ht_from_args(argv, cli->num_entries);
+            if (zones_ht == NULL) {
+                rc = EINVAL;
+                goto cleanup;
+            }
+            save_config = create_save_mode_config_for_port_zone_mode(zones_ht);
+        }
+
+        ret = start_in_save_mode(save_config, &stop_flag);
+        if (ret != 0) {
+            rc = EAGAIN;
+            /* start_in_save_mode may have left events threads running
+             * that still reference save_config (a pre-existing issue
+             * tracked separately). Don't destroy save_config in that
+             * case -- a small intentional leak on the abnormal-exit
+             * path is preferable to a use-after-free. */
+            save_config = NULL;
+        }
+    }
  
  cleanup:
      /* Tell any still-running events threads to exit. start_in_save_mode
@@ -823,12 +824,12 @@ struct cli_mode_config {
          }
          pthread_join(dbus_server_args.tid, NULL);
      }
-     if (save_targets != NULL) {
-         save_targets_destroy(save_targets);
-     }
-     if (dbus_server_args.load_targets != NULL) {
-         load_targets_destroy(dbus_server_args.load_targets);
-     }
+    if (save_config != NULL) {
+        destroy_save_mode_config(save_config);
+    }
+    if (dbus_server_args.load_config != NULL) {
+        destroy_load_mode_config(dbus_server_args.load_config);
+    }
      if (loop_mu_inited) {
          pthread_mutex_destroy(&dbus_server_args.loop_mu);
      }
@@ -963,16 +964,18 @@ struct cli_mode_config {
  
 /**
  * Per-entry content checks for the new LOAD port-zone layout, folded
- * with the (old_zone -> new_zone) remap build into a single argv pass.
+ * with the (old_zone -> new_zone) src-to-dst zone map build into a
+ * single argv pass.
  *
  * Arity is guaranteed by detect_load_input_kind(); we validate the content
  * of each (port_uuid, old_ct_zone, new_ct_zone) triple and, on success,
- * insert (old_zone -> new_zone) into a freshly allocated remap hashtable.
- * Returning the remap directly (instead of validating now and reparsing
- * post-fork via a separate builder) lets dmain() consume cli->zone_remap
- * without re-walking argv. The port_uuid column is content-checked here
- * but not stored: at LOAD time each CT entry only carries ATTR_ZONE, so
- * the only usable pivot is old_zone -> new_zone.
+ * insert (old_zone -> new_zone) into a freshly allocated hashtable.
+ * Returning the map directly (instead of validating now and reparsing
+ * post-fork via a separate builder) lets dmain() consume
+ * cli->src_dst_zone_map without re-walking argv. The port_uuid column
+ * is content-checked here but not stored: at LOAD time each CT entry
+ * only carries ATTR_ZONE, so the only usable pivot is
+ * old_zone -> new_zone.
  *
  * If two entries declare the same old_zone with different new_zones, the
  * last write wins and a WARNING is logged. Bad input (malformed UUID or
@@ -985,12 +988,13 @@ struct cli_mode_config {
  *
  * Returns:
  *   Newly allocated (old_zone -> new_zone) hashtable. Ownership transfers
- *   to the caller; consumed by load_targets_new_from_remap() in dmain().
+ *   to the caller; consumed by
+ *   create_load_mode_config_for_port_zone_mode() in dmain().
  */
 static GHashTable *
 check_zone_load_args(int argc, const char *const argv[])
 {
-    GHashTable *remap;
+    GHashTable *src_dst_zone_map;
     int n;
     int i;
     const int old_zone_offset = 1;
@@ -1002,7 +1006,7 @@ check_zone_load_args(int argc, const char *const argv[])
                                    "num_entries",
                                    MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES);
 
-    remap = g_hash_table_new(g_direct_hash, g_direct_equal);
+    src_dst_zone_map = g_hash_table_new(g_direct_hash, g_direct_equal);
 
     for (i = 0; i < n; i++) {
         int base = ENTRIES_LIST_START_ARG_INDEX + (i * LOAD_PORT_ZONE_STRIDE);
@@ -1013,25 +1017,25 @@ check_zone_load_args(int argc, const char *const argv[])
         gpointer existing_val;
 
         if (!is_valid_uuid_string(port_uuid)) {
-            g_hash_table_destroy(remap);
+            g_hash_table_destroy(src_dst_zone_map);
             errx(EXIT_FAILURE,
                  "Invalid UUID at port-zone entry %d: '%s'",
                  i, port_uuid);
         }
         if (!parse_ct_zone(old_zone_str, &old_zone)) {
-            g_hash_table_destroy(remap);
+            g_hash_table_destroy(src_dst_zone_map);
             errx(EXIT_FAILURE,
                  "Invalid old_ct_zone at port-zone entry %d: '%s'",
                  i, old_zone_str);
         }
         if (!parse_ct_zone(new_zone_str, &new_zone)) {
-            g_hash_table_destroy(remap);
+            g_hash_table_destroy(src_dst_zone_map);
             errx(EXIT_FAILURE,
                  "Invalid new_ct_zone at port-zone entry %d: '%s'",
                  i, new_zone_str);
         }
 
-        if (g_hash_table_lookup_extended(remap,
+        if (g_hash_table_lookup_extended(src_dst_zone_map,
                                          GUINT_TO_POINTER((guint) old_zone),
                                          NULL, &existing_val)) {
             uint16_t existing = (uint16_t) GPOINTER_TO_UINT(existing_val);
@@ -1043,12 +1047,12 @@ check_zone_load_args(int argc, const char *const argv[])
             }
         }
 
-        g_hash_table_insert(remap,
+        g_hash_table_insert(src_dst_zone_map,
                             GUINT_TO_POINTER((guint) old_zone),
                             GUINT_TO_POINTER((guint) new_zone));
     }
 
-    return remap;
+    return src_dst_zone_map;
 }
  
  /**
@@ -1099,39 +1103,39 @@ check_zone_load_args(int argc, const char *const argv[])
  *
  * Legacy LOAD takes no extra args beyond <mode> <helper_id>; the new LOAD
  * port-zone layout is content-validated AND the (old_zone -> new_zone)
- * remap is built in the same pass via check_zone_load_args(). The built
- * remap is published to the caller so dmain() can wrap it post-fork
- * without re-walking argv.
+ * src-to-dst zone map is built in the same pass via check_zone_load_args().
+ * The built map is published to the caller so dmain() can wrap it
+ * post-fork without re-walking argv.
  *
  * Reports the detected sub-kind and the declared entry count to the
  * caller so they can be recorded on cli_mode_config without an extra
  * argv parse.
  *
  * Args:
- *   @argc            num of arguments.
- *   @argv            array of CLI arguments.
- *   @out_kind        output pointer for the detected sub-kind. May be NULL.
- *   @out_n_entries   output pointer for the declared entry count, captured
- *                    from detect_load_input_kind's existing parse. May be
- *                    NULL. 0 on the LOAD legacy shortcut.
- *   @out_zone_remap  output pointer for the freshly built remap. May be
- *                    NULL (caller doesn't care). Always set to NULL for
- *                    LOAD_INPUT_LEGACY; non-NULL for LOAD_INPUT_PORT_ZONES.
- *                    Ownership transfers to the caller.
+ *   @argc                num of arguments.
+ *   @argv                array of CLI arguments.
+ *   @out_kind            output pointer for the detected sub-kind. May be NULL.
+ *   @out_n_entries       output pointer for the declared entry count, captured
+ *                        from detect_load_input_kind's existing parse. May be
+ *                        NULL. 0 on the LOAD legacy shortcut.
+ *   @out_src_dst_zone_map output pointer for the freshly built src-to-dst
+ *                        zone map. May be NULL (caller doesn't care). Always
+ *                        set to NULL for LOAD_INPUT_LEGACY; non-NULL for
+ *                        LOAD_INPUT_PORT_ZONES. Ownership transfers to the caller.
  */
 static void
 check_load_mode_args(int argc, const char *const argv[],
                      enum load_input_kind *out_kind,
                      int *out_n_entries,
-                     GHashTable **out_zone_remap)
+                     GHashTable **out_src_dst_zone_map)
 {
     int n_entries = 0;
-    GHashTable *remap = NULL;
+    GHashTable *src_dst_zone_map = NULL;
     enum load_input_kind kind =
         detect_load_input_kind(argc, argv, &n_entries);
 
     if (kind == LOAD_INPUT_PORT_ZONES) {
-        remap = check_zone_load_args(argc, argv);
+        src_dst_zone_map = check_zone_load_args(argc, argv);
     } else {
         if (kind != LOAD_INPUT_LEGACY) {
             errx(EXIT_FAILURE, "Invalid load input kind: %d", kind);
@@ -1144,11 +1148,11 @@ check_load_mode_args(int argc, const char *const argv[],
     if (out_n_entries != NULL) {
         *out_n_entries = n_entries;
     }
-    if (out_zone_remap != NULL) {
-        *out_zone_remap = remap;
-    } else if (remap != NULL) {
+    if (out_src_dst_zone_map != NULL) {
+        *out_src_dst_zone_map = src_dst_zone_map;
+    } else if (src_dst_zone_map != NULL) {
         /* Caller dropped ownership; don't leak. */
-        g_hash_table_destroy(remap);
+        g_hash_table_destroy(src_dst_zone_map);
     }
 }
  
@@ -1200,7 +1204,7 @@ check_load_mode_args(int argc, const char *const argv[],
                               &out->num_entries);
     } else {
         check_load_mode_args(argc, argv, &out->load_kind,
-                             &out->num_entries, &out->zone_remap);
+                             &out->num_entries, &out->src_dst_zone_map);
     }
 }
  

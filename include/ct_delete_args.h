@@ -30,8 +30,8 @@
  * (the two pairs overlay the same memory; only the active arm is set.)
  *
  * Ownership:
- *   - ips_migrated / zones_migrated are aliases into save_targets and must
- *     not be freed by the delete thread.
+ *   - ips_migrated / zones_migrated are aliases into save_mode_config and
+ *     must not be freed by the delete thread.
  *   - ips_on_host / zones_on_host are built by on_clear and consumed by
  *     the delete thread; they are released alongside process exit since
  *     the daemon is short-lived.

@@ -39,16 +39,16 @@ enum load_input_kind {
 };
 
 /**
- * Bundle of SAVE-side migration targets. Real C tagged union over @kind:
+ * SAVE-mode runtime config bundle. Real C tagged union over @kind:
  *   kind == SAVE_INPUT_IPS         -> ips_to_migrate is the active arm.
  *   kind == SAVE_INPUT_PORT_ZONES  -> zones_to_migrate is the active arm.
- * The active hashtable is owned by save_targets and freed by
- * save_targets_destroy (which dispatches on @kind because the two
+ * The active hashtable is owned by save_mode_config and freed by
+ * destroy_save_mode_config (which dispatches on @kind because the two
  * pointer fields now overlay the same memory). Anonymous union so call
- * sites can keep using targets->ips_to_migrate / targets->zones_to_migrate
- * directly.
+ * sites can keep using save_config->ips_to_migrate /
+ * save_config->zones_to_migrate directly.
  */
-struct save_targets {
+struct save_mode_config {
     enum save_input_kind kind;
     union {
         GHashTable *ips_to_migrate;     /* kind == SAVE_INPUT_IPS */
@@ -57,17 +57,18 @@ struct save_targets {
 };
 
 /**
- * Bundle of LOAD-side migration policy. Tagged union over CLI sub-mode:
- *   kind == LOAD_INPUT_LEGACY      -> zone_remap is NULL; pass-through.
- *   kind == LOAD_INPUT_PORT_ZONES  -> zone_remap is uint16->uint16 map,
- *                                     keyed by old_ct_zone, value is the
- *                                     new_ct_zone to write before
+ * LOAD-mode runtime config bundle. Tagged union over CLI sub-mode:
+ *   kind == LOAD_INPUT_LEGACY      -> src_dst_zone_map is NULL; pass-through.
+ *   kind == LOAD_INPUT_PORT_ZONES  -> src_dst_zone_map is uint16->uint16
+ *                                     map, keyed by old_ct_zone (source
+ *                                     side), value is the new_ct_zone
+ *                                     (destination side) to write before
  *                                     programming each CT entry.
- * Owned by load_targets and freed by load_targets_destroy.
+ * Owned by load_mode_config and freed by destroy_load_mode_config.
  */
-struct load_targets {
+struct load_mode_config {
     enum load_input_kind kind;
-    GHashTable *zone_remap;
+    GHashTable *src_dst_zone_map;
 };
 
 /**
@@ -173,22 +174,22 @@ GHashTable *
 create_hashtable_from_port_zone_pairs(const char *port_zone_strv[],
                                       int num_entries);
 
-struct save_targets *
-save_targets_new_from_ips(GHashTable *ips_to_migrate);
+struct save_mode_config *
+create_save_mode_config_for_ip_mode(GHashTable *ips_to_migrate);
 
-struct save_targets *
-save_targets_new_from_zones(GHashTable *zones);
-
-void
-save_targets_destroy(struct save_targets *);
-
-struct load_targets *
-load_targets_new_ips(void);
-
-struct load_targets *
-load_targets_new_from_remap(GHashTable *remap);
+struct save_mode_config *
+create_save_mode_config_for_port_zone_mode(GHashTable *zones);
 
 void
-load_targets_destroy(struct load_targets *);
+destroy_save_mode_config(struct save_mode_config *);
+
+struct load_mode_config *
+create_load_mode_config_for_legacy_mode(void);
+
+struct load_mode_config *
+create_load_mode_config_for_port_zone_mode(GHashTable *src_dst_zone_map);
+
+void
+destroy_load_mode_config(struct load_mode_config *);
 
 #endif /* COMMON_H */

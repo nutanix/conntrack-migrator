@@ -357,9 +357,9 @@ create_hashtable_from_port_zone_pairs(const char *port_zone_strv[],
 }
 
 /**
- * Allocates a save_targets bundle wrapping an ips_to_migrate hashtable.
+ * Allocates a save_mode_config bundle wrapping an ips_to_migrate hashtable.
  *
- * Takes ownership of @ips_to_migrate; subsequent save_targets_destroy()
+ * Takes ownership of @ips_to_migrate; subsequent destroy_save_mode_config()
  * will destroy it.
  *
  * Args:
@@ -368,27 +368,27 @@ create_hashtable_from_port_zone_pairs(const char *port_zone_strv[],
  * Returns:
  *   pointer to the bundle. Process aborts on allocation failure.
  */
-struct save_targets *
-save_targets_new_from_ips(GHashTable *ips_to_migrate)
+struct save_mode_config *
+create_save_mode_config_for_ip_mode(GHashTable *ips_to_migrate)
 {
-    struct save_targets *targets;
+    struct save_mode_config *save_config;
 
     if (ips_to_migrate == NULL) {
         errx(EXIT_FAILURE,
-             "%s: refusing to allocate IP-mode save_targets with NULL "
+             "%s: refusing to allocate IP-mode save_mode_config with NULL "
              "ips_to_migrate (programmer error in caller)", __func__);
     }
 
-    targets = g_malloc0(sizeof(*targets));
-    targets->kind = SAVE_INPUT_IPS;
-    targets->ips_to_migrate = ips_to_migrate;
-    return targets;
+    save_config = g_malloc0(sizeof(*save_config));
+    save_config->kind = SAVE_INPUT_IPS;
+    save_config->ips_to_migrate = ips_to_migrate;
+    return save_config;
 }
 
 /**
- * Allocates a save_targets bundle wrapping a zones_to_migrate hashtable.
+ * Allocates a save_mode_config bundle wrapping a zones_to_migrate hashtable.
  *
- * Takes ownership of @zones; subsequent save_targets_destroy() will
+ * Takes ownership of @zones; subsequent destroy_save_mode_config() will
  * destroy it.
  *
  * Args:
@@ -397,130 +397,131 @@ save_targets_new_from_ips(GHashTable *ips_to_migrate)
  * Returns:
  *   pointer to the bundle. Process aborts on allocation failure.
  */
-struct save_targets *
-save_targets_new_from_zones(GHashTable *zones)
+struct save_mode_config *
+create_save_mode_config_for_port_zone_mode(GHashTable *zones)
 {
-    struct save_targets *targets;
+    struct save_mode_config *zone_based_save_config;
 
     if (zones == NULL) {
         errx(EXIT_FAILURE,
-             "%s: refusing to allocate zone-mode save_targets with NULL "
+             "%s: refusing to allocate zone-mode save_mode_config with NULL "
              "zones (programmer error in caller)", __func__);
     }
 
-    targets = g_malloc0(sizeof(*targets));
-    targets->kind = SAVE_INPUT_PORT_ZONES;
-    targets->zones_to_migrate = zones;
-    return targets;
+    zone_based_save_config = g_malloc0(sizeof(*zone_based_save_config));
+    zone_based_save_config->kind = SAVE_INPUT_PORT_ZONES;
+    zone_based_save_config->zones_to_migrate = zones;
+    return zone_based_save_config;
 }
 
 /**
- * Releases a save_targets bundle and the hashtables it owns.
+ * Releases a save_mode_config bundle and the hashtables it owns.
  *
  * NULL-tolerant.
  *
  * Args:
- *   @targets pointer to the bundle. May be NULL.
+ *   @save_config pointer to the bundle. May be NULL.
  */
 void
-save_targets_destroy(struct save_targets *targets)
+destroy_save_mode_config(struct save_mode_config *save_config)
 {
-    if (targets == NULL) {
+    if (save_config == NULL) {
         return;
     }
 
     /* The two pointers overlay the same memory now, so checking both
      * blindly would double-free the active arm. Dispatch on @kind. */
-    switch (targets->kind) {
+    switch (save_config->kind) {
     case SAVE_INPUT_IPS:
-        if (targets->ips_to_migrate != NULL) {
-            g_hash_table_destroy(targets->ips_to_migrate);
-            targets->ips_to_migrate = NULL;
+        if (save_config->ips_to_migrate != NULL) {
+            g_hash_table_destroy(save_config->ips_to_migrate);
+            save_config->ips_to_migrate = NULL;
         }
         break;
     case SAVE_INPUT_PORT_ZONES:
-        if (targets->zones_to_migrate != NULL) {
-            g_hash_table_destroy(targets->zones_to_migrate);
-            targets->zones_to_migrate = NULL;
+        if (save_config->zones_to_migrate != NULL) {
+            g_hash_table_destroy(save_config->zones_to_migrate);
+            save_config->zones_to_migrate = NULL;
         }
         break;
     }
 
-    g_free(targets);
+    g_free(save_config);
 }
 
 /**
- * Allocates a LOAD targets bundle for the legacy (IP-based) mode.
+ * Allocates a load_mode_config bundle for the legacy (IP-based) mode.
  *
  * Legacy LOAD carries no zone information on the wire and needs no
- * rewrite, so zone_remap is left NULL. apply_zone_rewrite() in
+ * rewrite, so src_dst_zone_map is left NULL. apply_zone_rewrite() in
  * dbus_server.c short-circuits when kind is LOAD_INPUT_LEGACY.
  *
  * Returns:
  *   pointer to the bundle. Process aborts on allocation failure.
  */
-struct load_targets *
-load_targets_new_ips(void)
+struct load_mode_config *
+create_load_mode_config_for_legacy_mode(void)
 {
-    struct load_targets *targets;
+    struct load_mode_config *load_config;
 
-    targets = g_malloc0(sizeof(*targets));
-    targets->kind       = LOAD_INPUT_LEGACY;
-    return targets;
+    load_config = g_malloc0(sizeof(*load_config));
+    load_config->kind = LOAD_INPUT_LEGACY;
+    return load_config;
 }
 
 /**
- * Allocates a LOAD targets bundle that wraps a pre-built
- * (old_zone -> new_zone) remap hashtable.
+ * Allocates a load_mode_config bundle that wraps a pre-built
+ * (old_zone -> new_zone) src-to-dst zone map hashtable.
  *
- * Mirrors save_targets_new_from_zones() on the SAVE side: argv walking
- * lives in main.c (check_zone_load_args, which validates and builds the
- * remap in one pass during pre-fork CLI checking), and this function is
- * a pure wrapper that takes ownership of the remap.
+ * Mirrors create_save_mode_config_for_port_zone_mode() on the SAVE side:
+ * argv walking lives in main.c (check_zone_load_args, which validates
+ * and builds the src-to-dst zone map in one pass during pre-fork CLI
+ * checking), and this function is a pure wrapper that takes ownership
+ * of the map.
  *
  * Args:
- *   @remap  hashtable built by check_zone_load_args(). Must be non-NULL.
- *           Ownership transfers to the returned bundle and is released
- *           by load_targets_destroy().
+ *   @src_dst_zone_map  hashtable built by check_zone_load_args(). Must
+ *                      be non-NULL. Ownership transfers to the returned
+ *                      bundle and is released by destroy_load_mode_config().
  *
  * Returns:
- *   pointer to the bundle. Process aborts on a NULL @remap (caller
- *   contract violation) or on allocation failure.
+ *   pointer to the bundle. Process aborts on a NULL @src_dst_zone_map
+ *   (caller contract violation) or on allocation failure.
  */
-struct load_targets *
-load_targets_new_from_remap(GHashTable *remap)
+struct load_mode_config *
+create_load_mode_config_for_port_zone_mode(GHashTable *src_dst_zone_map)
 {
-    struct load_targets *targets;
+    struct load_mode_config *zone_based_load_config;
 
-    if (remap == NULL) {
+    if (src_dst_zone_map == NULL) {
         errx(EXIT_FAILURE,
-             "%s: refusing to allocate port-zone load_targets with NULL "
-             "remap (programmer error in caller)", __func__);
+             "%s: refusing to allocate port-zone load_mode_config with NULL "
+             "src_dst_zone_map (programmer error in caller)", __func__);
     }
 
-    targets = g_malloc0(sizeof(*targets));
-    targets->kind       = LOAD_INPUT_PORT_ZONES;
-    targets->zone_remap = remap;
-    return targets;
+    zone_based_load_config = g_malloc0(sizeof(*zone_based_load_config));
+    zone_based_load_config->kind = LOAD_INPUT_PORT_ZONES;
+    zone_based_load_config->src_dst_zone_map = src_dst_zone_map;
+    return zone_based_load_config;
 }
 
 /**
- * Releases a load_targets bundle and the hashtable it owns.
+ * Releases a load_mode_config bundle and the hashtable it owns.
  *
  * NULL-tolerant.
  *
  * Args:
- *   @targets pointer to the bundle. May be NULL.
+ *   @load_config pointer to the bundle. May be NULL.
  */
 void
-load_targets_destroy(struct load_targets *targets)
+destroy_load_mode_config(struct load_mode_config *load_config)
 {
-    if (targets == NULL) {
+    if (load_config == NULL) {
         return;
     }
-    if (targets->zone_remap != NULL) {
-        g_hash_table_destroy(targets->zone_remap);
-        targets->zone_remap = NULL;
+    if (load_config->src_dst_zone_map != NULL) {
+        g_hash_table_destroy(load_config->src_dst_zone_map);
+        load_config->src_dst_zone_map = NULL;
     }
-    g_free(targets);
+    g_free(load_config);
 }

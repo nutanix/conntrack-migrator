@@ -30,17 +30,17 @@
  * the conntrack events.
  */
 struct ct_events_targs {
-    pthread_t tid;                  // thread ID
-    struct save_targets *targets;   // SAVE targets bundle (mode-aware)
+    pthread_t tid;                            // thread ID
+    struct save_mode_config *save_config;     // SAVE-mode config (mode-aware)
     bool *stop_flag; // Flag when True, stop listening for CT events
     bool is_src; // Flag indicating whether the args are for src based events
 };
 
 int
-get_conntrack_dump(struct nfct_handle *, struct save_targets *);
+get_conntrack_dump(struct nfct_handle *, struct save_mode_config *);
 
 int
-listen_for_conntrack_events(struct mnl_socket *, struct save_targets *,
+listen_for_conntrack_events(struct mnl_socket *, struct save_mode_config *,
                             bool, bool *);
 
 int

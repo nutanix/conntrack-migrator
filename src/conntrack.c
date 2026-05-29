@@ -232,7 +232,7 @@ validate_ct_entry(enum nf_conntrack_msg_type type, const struct nf_conntrack *ct
  *   @type nf message type.
  *   @ct pointer to the conntrack entry received.
  *   @data pointer to the data sent to the callback. In this case it is
- *         a struct save_targets *.
+ *         a struct save_mode_config *.
  *
  * Returns:
  *   NFCT_CB_CONTINUE representing continue processing of
@@ -244,7 +244,7 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
                         void *data)
 {
     bool is_entry_useful;
-    struct save_targets *targets;
+    struct save_mode_config *save_config;
     struct in_addr *src_addr, *dst_addr;
 
     if (ct == NULL) {
@@ -256,18 +256,18 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
         return NFCT_CB_CONTINUE;
     }
 
-    targets = data;
+    save_config = data;
 
-    if (!validate_ct_entry(type, ct, targets->kind)) {
+    if (!validate_ct_entry(type, ct, save_config->kind)) {
         return NFCT_CB_CONTINUE;
     }
 
-    if (targets->kind == SAVE_INPUT_IPS) {
+    if (save_config->kind == SAVE_INPUT_IPS) {
         src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
         dst_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_DST);
 
         is_entry_useful = is_src_or_dst_in_hashtable(src_addr, dst_addr,
-                                                     targets->ips_to_migrate);
+                                                     save_config->ips_to_migrate);
     } else {
         uint16_t zone;
         if (!ct_get_migration_zone(ct, &zone)) {
@@ -276,11 +276,11 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
             return NFCT_CB_CONTINUE;
         }
         is_entry_useful = is_zone_in_hashtable(zone,
-                                               targets->zones_to_migrate);
+                                               save_config->zones_to_migrate);
     }
 
     if (is_entry_useful) {
-        update_conntrack_store(conn_store, ct, type, targets->kind);
+        update_conntrack_store(conn_store, ct, type, save_config->kind);
     }
 
     return NFCT_CB_CONTINUE;
@@ -329,18 +329,19 @@ _conntrack_dump(struct nfct_handle *h, dump_cb cb, void *cb_args)
  *
  * Args:
  *   @handle handle to the netlink socket.
- *   @targets SAVE targets bundle (mode-aware) to filter the CT entries.
+ *   @save_config SAVE-mode config (mode-aware) to filter the CT entries.
  *
  * Returns:
  *   0 if the operation was successful. -1 otherwise.
  */
 int
-get_conntrack_dump(struct nfct_handle *handle, struct save_targets *targets)
+get_conntrack_dump(struct nfct_handle *handle,
+                   struct save_mode_config *save_config)
 {
     int ret;
 
     LOG(INFO, "%s: Conntrack dump start", __func__);
-    ret = _conntrack_dump(handle, conntrack_dump_callback, targets);
+    ret = _conntrack_dump(handle, conntrack_dump_callback, save_config);
     LOG(INFO, "%s: Conntrack dump end", __func__);
 
     return ret;
@@ -354,11 +355,11 @@ get_conntrack_dump(struct nfct_handle *handle, struct save_targets *targets)
  * Closure context for conntrack_events_callback.
  *
  * mnl_cb_run takes a single void *user_data; this struct bundles the
- * SAVE-targets pointer with the stop_flag so the callback can dispatch
- * on kind and exit gracefully.
+ * SAVE-mode config pointer with the stop_flag so the callback can
+ * dispatch on kind and exit gracefully.
  */
 struct events_cb_ctx {
-    struct save_targets *targets;
+    struct save_mode_config *save_config;
     bool *stop_flag;
 };
 
@@ -369,7 +370,7 @@ struct events_cb_ctx {
  * Args:
  *   @nlh pointer to the netlink message header.
  *   @data pointer to the data sent to the callback. Here it's an
- *     events_cb_ctx providing both the targets bundle and the stop_flag.
+ *     events_cb_ctx providing both the SAVE-mode config and the stop_flag.
  *
  * Returns:
  *  - MNL_CB_STOP if we need to stop further event processing.
@@ -418,24 +419,24 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
 
     nfct_nlmsg_parse(nlh, ct);
 
-    if (!validate_ct_entry(type, ct, ctx->targets->kind)) {
+    if (!validate_ct_entry(type, ct, ctx->save_config->kind)) {
         goto out;
     }
 
     /* BPF couldn't pre-filter zone-mode events, so do it in-callback. */
-    if (ctx->targets->kind == SAVE_INPUT_PORT_ZONES) {
+    if (ctx->save_config->kind == SAVE_INPUT_PORT_ZONES) {
         uint16_t zone;
         if (!ct_get_migration_zone(ct, &zone)) {
             LOG(WARNING, "%s: event has no zone attribute; skipping.",
                 __func__);
             goto out;
         }
-        if (!is_zone_in_hashtable(zone, ctx->targets->zones_to_migrate)) {
+        if (!is_zone_in_hashtable(zone, ctx->save_config->zones_to_migrate)) {
             goto out;
         }
     }
 
-    update_conntrack_store(conn_store, ct, type, ctx->targets->kind);
+    update_conntrack_store(conn_store, ct, type, ctx->save_config->kind);
 
 out:
     nfct_destroy(ct);
@@ -495,7 +496,7 @@ create_nfct_filter(GHashTable *ips, bool is_src_filter)
  * events for particular entries based on the filter.
  *
  * This function listens on the netlink socket for the events on particular
- * IPs / CT zones provided via the targets bundle. These events include
+ * IPs / CT zones provided via the SAVE-mode config. These events include
  * create/update/deletion of CT entries.
  *
  * In IP mode a BPF filter is attached on the socket so the kernel only
@@ -509,7 +510,7 @@ create_nfct_filter(GHashTable *ips, bool is_src_filter)
  *
  * Args:
  *   @nl pointer to the netlink socket.
- *   @targets SAVE targets bundle (mode-aware) used for filtering.
+ *   @save_config SAVE-mode config (mode-aware) used for filtering.
  *   @is_src_filter bool representing whether the filter is to be applied
  *     on the source ip or destination ip address. Ignored in zone mode.
  *   @stop_flag pointer to bool passed to the callbacks to stop processing
@@ -520,7 +521,7 @@ create_nfct_filter(GHashTable *ips, bool is_src_filter)
  */
 int
 listen_for_conntrack_events(struct mnl_socket *nl,
-                            struct save_targets *targets,
+                            struct save_mode_config *save_config,
                             bool is_src_filter,
                             bool *stop_flag)
 {
@@ -533,7 +534,7 @@ listen_for_conntrack_events(struct mnl_socket *nl,
         .tv_usec = 0
     };
     struct events_cb_ctx ctx = {
-        .targets = targets,
+        .save_config = save_config,
         .stop_flag = stop_flag,
     };
 
@@ -543,9 +544,9 @@ listen_for_conntrack_events(struct mnl_socket *nl,
     // zone, so zone-mode threads run unfiltered and the callback does the
     // zone match in-process. filter / filter_attach_ret live only inside
     // this branch -- the zone path never touches them.
-    if (targets->kind == SAVE_INPUT_IPS) {
+    if (save_config->kind == SAVE_INPUT_IPS) {
         struct nfct_filter *filter =
-            create_nfct_filter(targets->ips_to_migrate, is_src_filter);
+            create_nfct_filter(save_config->ips_to_migrate, is_src_filter);
         int filter_attach_ret = nfct_filter_attach(fd, filter);
         if (filter_attach_ret == -1) {
             LOG(ERROR, "%s: Failed to attach filter to the socket. %s",
