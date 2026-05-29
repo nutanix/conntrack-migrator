@@ -151,11 +151,6 @@ pthread_wrapper_ct_events(void *data)
     struct ct_events_targs *targs;
     struct mnl_socket *nl;
 
-    if (data == NULL) {
-        LOG(ERROR, "%s: data is NULL", __func__);
-        return NULL;
-    }
-
     targs = (struct ct_events_targs *) data;
     LOG(INFO, "%s: Starting conntrack events thread. is_src = %d", __func__,
         targs->is_src);
@@ -460,12 +455,13 @@ create_zones_ht_from_args(char *argv[], int n_entries)
     int i;
     const char **zones;
     GHashTable *ht;
+    const int old_zone_offset = 1;
 
     zones = g_malloc0(sizeof(*zones) * n_entries);
     for (i = 0; i < n_entries; i++) {
         int port_uuid_index =
             ENTRIES_LIST_START_ARG_INDEX + (i * SAVE_PORT_ZONE_STRIDE);
-        int zone_index = port_uuid_index + 1;
+        int zone_index = port_uuid_index + old_zone_offset;
         zones[i] = argv[zone_index];
     }
 
@@ -477,6 +473,80 @@ create_zones_ht_from_args(char *argv[], int n_entries)
         return NULL;
     }
     return ht;
+}
+
+/**
+ * Parses N port-zone-remap entries out of argv into an
+ * old_zone -> new_zone hashtable for LOAD-mode use.
+ *
+ * Mirrors create_zones_ht_from_args() on the SAVE side. The port_uuid
+ * column at offset 0 is intentionally ignored: at LOAD time each CT
+ * entry only carries ATTR_ZONE, so the only usable pivot is
+ * old_zone -> new_zone. UUID well-formedness has already been
+ * validated by check_zone_load_args() pre-fork.
+ *
+ * If two entries declare the same old_zone with different new_zones,
+ * the last write wins and a WARNING is logged.
+ *
+ * Args:
+ *   @argv      full argv array.
+ *   @n_entries declared entry count from cli_mode_config.num_entries
+ *              (already validated by check_zone_load_args pre-fork;
+ *              must be > 0 - caller branches on load_kind first).
+ *
+ * Returns:
+ *   remap hashtable on success (caller owns it), NULL on parse
+ *   failure (partially-built remap is torn down before returning).
+ */
+static GHashTable *
+build_zone_remap_from_args(char *argv[], int n_entries)
+{
+    GHashTable *remap;
+    int i;
+    const int old_zone_offset = 1;
+    const int new_zone_offset = 2;
+
+    if (n_entries <= 0) {
+        LOG(ERROR, "%s: non-positive n_entries (%d)", __func__, n_entries);
+        return NULL;
+    }
+
+    remap = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+    for (i = 0; i < n_entries; i++) {
+        int base = ENTRIES_LIST_START_ARG_INDEX + (i * LOAD_PORT_ZONE_STRIDE);
+        const char *old_zone_str = argv[base + old_zone_offset];
+        const char *new_zone_str = argv[base + new_zone_offset];
+        uint16_t old_zone, new_zone;
+        gpointer existing_val;
+
+        if (!parse_ct_zone(old_zone_str, &old_zone) ||
+            !parse_ct_zone(new_zone_str, &new_zone)) {
+            LOG(ERROR, "%s: failed to parse zone at entry %d "
+                "(old='%s' new='%s')",
+                __func__, i, old_zone_str, new_zone_str);
+            g_hash_table_destroy(remap);
+            return NULL;
+        }
+
+        if (g_hash_table_lookup_extended(remap,
+                                         GUINT_TO_POINTER((guint) old_zone),
+                                         NULL, &existing_val)) {
+            uint16_t existing = (uint16_t) GPOINTER_TO_UINT(existing_val);
+            if (existing != new_zone) {
+                LOG(WARNING, "%s: old_zone %u remapped twice "
+                    "(was -> %u, now -> %u). Last write wins.",
+                    __func__, (unsigned) old_zone,
+                    (unsigned) existing, (unsigned) new_zone);
+            }
+        }
+
+        g_hash_table_insert(remap,
+                            GUINT_TO_POINTER((guint) old_zone),
+                            GUINT_TO_POINTER((guint) new_zone));
+    }
+
+    return remap;
 }
 
 /**
@@ -649,7 +719,6 @@ dmain(int argc, char *argv[], const struct cli_mode_config *cli)
     (void) argc;
 
     if (argv == NULL || cli == NULL) {
-        /* log facility not initialised yet; bail with a distinct rc. */
         return EINVAL;
     }
 
@@ -707,15 +776,14 @@ dmain(int argc, char *argv[], const struct cli_mode_config *cli)
             dbus_server_args.load_targets = load_targets_new_ips();
             LOG(INFO, "%s: LOAD legacy mode (no zone rewrite)", __func__);
         } else {
-            dbus_server_args.load_targets =
-                load_targets_new_from_zone_args(cli->num_entries, argv,
-                                                ENTRIES_LIST_START_ARG_INDEX,
-                                                LOAD_PORT_ZONE_STRIDE);
-            if (dbus_server_args.load_targets == NULL) {
-                LOG(ERROR, "%s: failed to build load_targets", __func__);
+            GHashTable *remap = build_zone_remap_from_args(argv,
+                                                           cli->num_entries);
+            if (remap == NULL) {
+                LOG(ERROR, "%s: failed to build zone remap", __func__);
                 rc = EINVAL;
                 goto cleanup;
             }
+            dbus_server_args.load_targets = load_targets_new_from_remap(remap);
             LOG(INFO, "%s: LOAD port-zones mode, %d remap entries",
                 __func__, cli->num_entries);
         }
@@ -898,6 +966,7 @@ check_zone_save_args(int argc, char *argv[])
 {
     int n;
     int i;
+    const int old_zone_offset = 1;
 
     (void) argc;
 
@@ -908,7 +977,7 @@ check_zone_save_args(int argc, char *argv[])
     for (i = 0; i < n; i++) {
         int base = ENTRIES_LIST_START_ARG_INDEX + (i * SAVE_PORT_ZONE_STRIDE);
         const char *port_uuid = argv[base];
-        const char *zone_str  = argv[base + 1];
+        const char *zone_str  = argv[base + old_zone_offset];
         uint16_t zone_val;
 
         if (!is_valid_uuid_string(port_uuid)) {
@@ -939,6 +1008,8 @@ check_zone_load_args(int argc, char *argv[])
 {
     int n;
     int i;
+    const int old_zone_offset = 1;
+    const int new_zone_offset = 2;
 
     (void) argc;
 
@@ -949,8 +1020,8 @@ check_zone_load_args(int argc, char *argv[])
     for (i = 0; i < n; i++) {
         int base = ENTRIES_LIST_START_ARG_INDEX + (i * LOAD_PORT_ZONE_STRIDE);
         const char *port_uuid    = argv[base];
-        const char *old_zone_str = argv[base + 1];
-        const char *new_zone_str = argv[base + 2];
+        const char *old_zone_str = argv[base + old_zone_offset];
+        const char *new_zone_str = argv[base + new_zone_offset];
         uint16_t z;
 
         if (!is_valid_uuid_string(port_uuid)) {

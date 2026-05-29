@@ -186,8 +186,7 @@ struct load_targets *
 load_targets_new_ips(void);
 
 struct load_targets *
-load_targets_new_from_zone_args(int n_entries, char *argv[], int start_idx,
-                                int stride);
+load_targets_new_from_remap(GHashTable *remap);
 
 void
 load_targets_destroy(struct load_targets *);
