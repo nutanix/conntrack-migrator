@@ -309,7 +309,7 @@ on_save(VMState1 *object, GDBusMethodInvocation *invocation, gpointer user_data)
     // gracefully exit.
     *(targs->stop_flag) = true;
 
-    data_tmpl = data_template_new();
+    data_tmpl = data_template_new(targs->save_kind);
 
     buf = marshal(conn_store, data_tmpl, &data_size);
     if (buf == NULL) {

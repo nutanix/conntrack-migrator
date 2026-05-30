@@ -47,6 +47,10 @@ struct dbus_targs {
     const char *helper_id;   // helper_id used to export the object
     bool *stop_flag;         // flag to stop the thread listening for events
     enum op_mode mode;       // mode of operation LOAD/SAVE
+    enum save_input_kind save_kind; // SAVE-only; consumed by on_save to
+                                    // size the outgoing data_template.
+                                    // Undefined in LOAD mode (on_save
+                                    // never fires there).
     struct load_mode_config *load_config; // LOAD-only mode config. NULL in SAVE.
 
     /* Loop shutdown coordination. See dbus_server_request_quit. */

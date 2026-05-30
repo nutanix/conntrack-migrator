@@ -719,13 +719,14 @@ start_in_save_mode(struct save_mode_config *save_config, bool *stop_flag)
          goto cleanup;
      }
  
-     // Start the dbus server
-     dbus_server_args.helper_id    = helper_id;
-     dbus_server_args.stop_flag    = &stop_flag;
+    // Start the dbus server
+    dbus_server_args.helper_id    = helper_id;
+    dbus_server_args.stop_flag    = &stop_flag;
     dbus_server_args.mode         = cli->mode;
+    dbus_server_args.save_kind    = cli->save_kind; /* unused in LOAD; on_save reads it */
     dbus_server_args.load_config  = NULL;
     dbus_server_args.loop         = NULL;
-     dbus_server_args.should_quit  = false;
+    dbus_server_args.should_quit  = false;
      ret = pthread_mutex_init(&dbus_server_args.loop_mu, NULL);
      if (ret != 0) {
          LOG(ERROR, "%s: failed to init loop_mu: %s", __func__, strerror(ret));
