@@ -21,6 +21,28 @@
 #include <glib.h>
 
 /**
+ * Per-argument minimum values for ensure_cli_arg_is_int_at_least.
+ *
+ * Each constant names the CLI argument whose lower bound it enforces,
+ * so the call site reads as a domain-level statement instead of a
+ * magic number:
+ *
+ *   ensure_cli_arg_is_int_at_least(argv[MODE_ARG_INDEX], &mode, "mode",
+ *                                  MIN_ACCEPTABLE_VALUE_FOR_MODE);
+ *
+ * Rationale for the values:
+ *   - mode:        valid op-mode IDs start at 1 (the upper bound is
+ *                  separately enforced by check_mode()).
+ *   - num_entries: a zones/targets list of zero entries is not
+ *                  meaningful, so callers require at least one.
+ *   - num_ips:     zero is legitimate — it means "VM has no IPv4
+ *                  NICs" (start_in_save_mode early-exits in that case).
+ */
+ #define MIN_ACCEPTABLE_VALUE_FOR_MODE         1
+ #define MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES  1
+ #define MIN_ACCEPTABLE_VALUE_FOR_NUM_IPS      0
+
+/**
  * Sub-mode tag: tells the rest of the daemon which SAVE-mode CLI layout
  * was detected from argv.
  */
@@ -90,27 +112,6 @@ is_valid_uuid_string(const char *);
 bool
 parse_ct_zone(const char *, uint16_t *);
 
-/**
- * Per-argument minimum values for ensure_cli_arg_is_int_at_least.
- *
- * Each constant names the CLI argument whose lower bound it enforces,
- * so the call site reads as a domain-level statement instead of a
- * magic number:
- *
- *   ensure_cli_arg_is_int_at_least(argv[MODE_ARG_INDEX], &mode, "mode",
- *                                  MIN_ACCEPTABLE_VALUE_FOR_MODE);
- *
- * Rationale for the values:
- *   - mode:        valid op-mode IDs start at 1 (the upper bound is
- *                  separately enforced by check_mode()).
- *   - num_entries: a zones/targets list of zero entries is not
- *                  meaningful, so callers require at least one.
- *   - num_ips:     zero is legitimate — it means "VM has no IPv4
- *                  NICs" (start_in_save_mode early-exits in that case).
- */
-#define MIN_ACCEPTABLE_VALUE_FOR_MODE         1
-#define MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES  1
-#define MIN_ACCEPTABLE_VALUE_FOR_NUM_IPS      0
 
 /**
  * Ensures that a CLI argument string is an integer >= @min_value and
