@@ -130,10 +130,6 @@ ct_get_migration_zone(const struct nf_conntrack *ct, uint16_t *out)
         *out = nfct_get_attr_u16(ct, ATTR_ZONE);
         return true;
     }
-    if (nfct_attr_is_set(ct, ATTR_ORIG_ZONE) > 0) {
-        *out = nfct_get_attr_u16(ct, ATTR_ORIG_ZONE);
-        return true;
-    }
     return false;
 }
 
@@ -205,8 +201,7 @@ validate_ct_entry(enum nf_conntrack_msg_type type, const struct nf_conntrack *ct
             return false;
         }
     } else {
-        if (nfct_attr_is_set(ct, ATTR_ZONE) <= 0 &&
-            nfct_attr_is_set(ct, ATTR_ORIG_ZONE) <= 0) {
+        if (nfct_attr_is_set(ct, ATTR_ZONE) <= 0) {
             return false;
         }
     }
