@@ -93,7 +93,7 @@ conntrack_store_destroy(struct conntrack_store *conn_store)
 static int
 conntrack_store_insert(struct conntrack_store *conn_store,
                        const struct nf_conntrack *ct,
-                       enum save_input_kind kind)
+                       enum save_mode_op_type op_type)
 {
     uint32_t ct_id;
     struct conntrack_entry *ct_entry;
@@ -113,7 +113,7 @@ conntrack_store_insert(struct conntrack_store *conn_store,
         return -1;
     }
 
-    ct_entry = conntrack_entry_from_nf_conntrack(ct, kind);
+    ct_entry = conntrack_entry_from_nf_conntrack(ct, op_type);
     if (ct_entry == NULL) {
         LOG(WARNING, "%s: received ct_entry as NULL", __func__);
         return -1;
@@ -179,9 +179,9 @@ conntrack_store_remove(struct conntrack_store *conn_store,
 static void
 handle_new_event(struct conntrack_store *conn_store,
                  const struct nf_conntrack *ct,
-                 enum save_input_kind kind)
+                 enum save_mode_op_type op_type)
 {
-    conntrack_store_insert(conn_store, ct, kind);
+    conntrack_store_insert(conn_store, ct, op_type);
 }
 
 /**
@@ -200,7 +200,7 @@ handle_new_event(struct conntrack_store *conn_store,
 static void
 handle_update_event(struct conntrack_store *conn_store,
                     const struct nf_conntrack *ct,
-                    enum save_input_kind kind)
+                    enum save_mode_op_type op_type)
 {
     uint32_t ct_id;
     struct conntrack_entry *ct_entry;
@@ -222,9 +222,9 @@ handle_update_event(struct conntrack_store *conn_store,
     if (ct_entry == NULL) {
         LOG(VERBOSE, "%s: Update received for a non-existent entry. "
             "Treating it as NEW.", __func__);
-        res_ct_entry = conntrack_entry_from_nf_conntrack(ct, kind);
+        res_ct_entry = conntrack_entry_from_nf_conntrack(ct, op_type);
     } else {
-        res_ct_entry = get_conntrack_entry_from_update(ct_entry, ct, kind);
+        res_ct_entry = get_conntrack_entry_from_update(ct_entry, ct, op_type);
     }
 
     if (res_ct_entry == NULL) {
@@ -271,14 +271,14 @@ handle_destroy_event(struct conntrack_store *conn_store,
  *    @ct pointer to the nf_conntrack entry received as part of the
  *        netlink event.
  *    @type event type. (NEW/UPDATE/DESTROY)
- *    @kind active SAVE sub-mode; threaded through to entry construction
+ *    @op_type active SAVE sub-mode; threaded through to entry construction
  *          so the wire-format bitmap stays mode-correct.
  */
 void
 update_conntrack_store(struct conntrack_store *conn_store,
                        const struct nf_conntrack *ct,
                        enum nf_conntrack_msg_type type,
-                       enum save_input_kind kind)
+                       enum save_mode_op_type op_type)
 {
     if (ct == NULL) {
         LOG(ERROR, "%s: ct is NULL", __func__);
@@ -287,10 +287,10 @@ update_conntrack_store(struct conntrack_store *conn_store,
 
     switch(type) {
     case NFCT_T_NEW:
-        handle_new_event(conn_store, ct, kind);
+        handle_new_event(conn_store, ct, op_type);
         break;
     case NFCT_T_UPDATE:
-        handle_update_event(conn_store, ct, kind);
+        handle_update_event(conn_store, ct, op_type);
         break;
     case NFCT_T_DESTROY:
         handle_destroy_event(conn_store, ct);

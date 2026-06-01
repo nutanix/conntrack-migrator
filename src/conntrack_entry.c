@@ -241,19 +241,19 @@ is_zone_only_slot(int bit_num)
  * Args:
  *   @ct pointer to the nf_conntrack entry
  *   @bm pointer to the bitmap.
- *   @kind active SAVE sub-mode; controls whether zone-only slots are
+ *   @op_type active SAVE sub-mode; controls whether zone-only slots are
  *         eligible for inclusion.
  */
 static void
 create_bitmap_from_nf_conntrack(const struct nf_conntrack *ct, uint32_t *bm,
-                                enum save_input_kind kind)
+                                enum save_mode_op_type op_type)
 {
     int i;
 
     for (i = CT_ATTR_MIN; i < CT_ATTR_MAX; i++) {
         enum nf_conntrack_attr nf_ct_attr;
 
-        if (kind == SAVE_INPUT_IPS && is_zone_only_slot(i)) {
+        if (op_type == SAVE_IPS_OP && is_zone_only_slot(i)) {
             continue;
         }
 
@@ -300,7 +300,7 @@ label_from_nf_bitmask(const struct nfct_bitmask *ct_label)
  *
  * Args:
  *   @ct pointer to the nf_conntrack object.
- *   @kind active SAVE sub-mode; threads down to the bitmap construction
+ *   @op_type active SAVE sub-mode; threads down to the bitmap construction
  *         so IP-mode payloads remain byte-identical to the pre-Step-2
  *         wire format.
  *
@@ -309,7 +309,7 @@ label_from_nf_bitmask(const struct nfct_bitmask *ct_label)
  */
 struct conntrack_entry *
 conntrack_entry_from_nf_conntrack(const struct nf_conntrack *ct,
-                                  enum save_input_kind kind)
+                                  enum save_mode_op_type op_type)
 {
     struct conntrack_entry *ct_entry;
     int data_size;
@@ -326,7 +326,7 @@ conntrack_entry_from_nf_conntrack(const struct nf_conntrack *ct,
     ct_entry = conntrack_entry_new();
 
     // Generate bitmap from nfct conntrack struct.
-    create_bitmap_from_nf_conntrack(ct, ct_entry->bitmap, kind);
+    create_bitmap_from_nf_conntrack(ct, ct_entry->bitmap, op_type);
 
     // Use the bitmap to calculate data size.
     data_size = get_data_size_from_bitmap(ct_entry->bitmap);
@@ -384,18 +384,18 @@ err:
  *     stored.
  *   @bm pointer to the first bitmap.
  *   @ct pointer to the netlink conntrack entry.
- *   @kind active SAVE sub-mode; zone-only slots are skipped in IP mode
+ *   @op_type active SAVE sub-mode; zone-only slots are skipped in IP mode
  *         to preserve the legacy wire format.
  */
 static void
 apply_or_operation(uint32_t *res_bm, uint32_t *bm, const struct nf_conntrack *ct,
-                   enum save_input_kind kind)
+                   enum save_mode_op_type op_type)
 {
     enum nf_conntrack_attr nf_ct_attr;
     int i;
 
     for (i = CT_ATTR_MIN; i < CT_ATTR_MAX; i++) {
-        if (kind == SAVE_INPUT_IPS && is_zone_only_slot(i)) {
+        if (op_type == SAVE_IPS_OP && is_zone_only_slot(i)) {
             continue;
         }
         // If some value is set in the original bitmap. Retain the value.
@@ -430,7 +430,7 @@ apply_or_operation(uint32_t *res_bm, uint32_t *bm, const struct nf_conntrack *ct
  * Args:
  *   @ct_entry pointer to the original conntrack entry.
  *   @ct pointer to the ct from the nfct events.
- *   @kind active SAVE sub-mode; threads down to apply_or_operation so
+ *   @op_type active SAVE sub-mode; threads down to apply_or_operation so
  *         IP-mode payloads cannot acquire zone-only bits even if the
  *         kernel update happens to expose those NF attributes.
  *
@@ -441,7 +441,7 @@ apply_or_operation(uint32_t *res_bm, uint32_t *bm, const struct nf_conntrack *ct
 struct conntrack_entry *
 get_conntrack_entry_from_update(struct conntrack_entry *ct_entry,
                                 const struct nf_conntrack *ct,
-                                enum save_input_kind kind)
+                                enum save_mode_op_type op_type)
 {
     struct conntrack_entry *res_ct_entry;
     int data_size;
@@ -460,7 +460,7 @@ get_conntrack_entry_from_update(struct conntrack_entry *ct_entry,
     res_ct_entry = conntrack_entry_new();
 
     // Generate bitmap from nfct conntrack struct.
-    apply_or_operation(res_ct_entry->bitmap, ct_entry->bitmap, ct, kind);
+    apply_or_operation(res_ct_entry->bitmap, ct_entry->bitmap, ct, op_type);
 
     // Use the bitmap to calculate data size.
     data_size = get_data_size_from_bitmap(res_ct_entry->bitmap);

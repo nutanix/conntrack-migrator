@@ -38,11 +38,11 @@
  * See declaration in common.h for full doc.
  */
 const char *
-save_input_kind_to_string(enum save_input_kind kind)
+convert_save_mode_op_type_to_string(enum save_mode_op_type op_type)
 {
-    switch (kind) {
-    case SAVE_INPUT_IPS:        return "IPS";
-    case SAVE_INPUT_PORT_ZONES: return "PORT_ZONES";
+    switch (op_type) {
+    case SAVE_IPS_OP:        return "IPS";
+    case SAVE_PORT_ZONE_OP:  return "PORT_ZONE";
     }
     return "UNKNOWN";
 }
@@ -380,7 +380,7 @@ create_save_mode_config_for_ip_mode(GHashTable *ips_to_migrate)
     }
 
     save_config = g_malloc0(sizeof(*save_config));
-    save_config->kind = SAVE_INPUT_IPS;
+    save_config->op_type = SAVE_IPS_OP;
     save_config->ips_to_migrate = ips_to_migrate;
     return save_config;
 }
@@ -409,7 +409,7 @@ create_save_mode_config_for_port_zone_mode(GHashTable *zones)
     }
 
     zone_based_save_config = g_malloc0(sizeof(*zone_based_save_config));
-    zone_based_save_config->kind = SAVE_INPUT_PORT_ZONES;
+    zone_based_save_config->op_type = SAVE_PORT_ZONE_OP;
     zone_based_save_config->zones_to_migrate = zones;
     return zone_based_save_config;
 }
@@ -430,15 +430,15 @@ destroy_save_mode_config(struct save_mode_config *save_config)
     }
 
     /* The two pointers overlay the same memory now, so checking both
-     * blindly would double-free the active arm. Dispatch on @kind. */
-    switch (save_config->kind) {
-    case SAVE_INPUT_IPS:
+     * blindly would double-free the active arm. Dispatch on @op_type. */
+    switch (save_config->op_type) {
+    case SAVE_IPS_OP:
         if (save_config->ips_to_migrate != NULL) {
             g_hash_table_destroy(save_config->ips_to_migrate);
             save_config->ips_to_migrate = NULL;
         }
         break;
-    case SAVE_INPUT_PORT_ZONES:
+    case SAVE_PORT_ZONE_OP:
         if (save_config->zones_to_migrate != NULL) {
             g_hash_table_destroy(save_config->zones_to_migrate);
             save_config->zones_to_migrate = NULL;
@@ -454,7 +454,7 @@ destroy_save_mode_config(struct save_mode_config *save_config)
  *
  * Legacy LOAD carries no zone information on the wire and needs no
  * rewrite, so src_dst_zone_map is left NULL. apply_zone_rewrite() in
- * dbus_server.c short-circuits when kind is LOAD_INPUT_LEGACY.
+ * dbus_server.c short-circuits when op_type is LOAD_IPS_OP.
  *
  * Returns:
  *   pointer to the bundle. Process aborts on allocation failure.
@@ -465,7 +465,7 @@ create_load_mode_config_for_legacy_mode(void)
     struct load_mode_config *load_config;
 
     load_config = g_malloc0(sizeof(*load_config));
-    load_config->kind = LOAD_INPUT_LEGACY;
+    load_config->op_type = LOAD_IPS_OP;
     return load_config;
 }
 
@@ -500,7 +500,7 @@ create_load_mode_config_for_port_zone_mode(GHashTable *src_dst_zone_map)
     }
 
     zone_based_load_config = g_malloc0(sizeof(*zone_based_load_config));
-    zone_based_load_config->kind = LOAD_INPUT_PORT_ZONES;
+    zone_based_load_config->op_type = LOAD_PORT_ZONE_OP;
     zone_based_load_config->src_dst_zone_map = src_dst_zone_map;
     return zone_based_load_config;
 }

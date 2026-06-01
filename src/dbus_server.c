@@ -84,7 +84,7 @@ apply_zone_rewrite(struct nf_conntrack *ct,
         return false;
     }
 
-    if (load_config == NULL || load_config->kind == LOAD_INPUT_LEGACY) {
+    if (load_config == NULL || load_config->op_type == LOAD_IPS_OP) {
         return true;
     }
 
@@ -309,7 +309,7 @@ on_save(VMState1 *object, GDBusMethodInvocation *invocation, gpointer user_data)
     // gracefully exit.
     *(targs->stop_flag) = true;
 
-    data_tmpl = data_template_new(targs->save_kind);
+    data_tmpl = data_template_new(targs->save_op_type);
 
     buf = marshal(conn_store, data_tmpl, &data_size);
     if (buf == NULL) {
@@ -350,13 +350,13 @@ complete_on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation)
  * Payload shape, in both modes, is "as" (array of strings). The
  * interpretation depends on the helper's active SAVE sub-mode, which
  * is fixed at start-up in start_in_save_mode and recorded on
- * ct_del_args.kind (an extern global declared in ct_delete_args.h):
+ * ct_del_args.op_type (an extern global declared in ct_delete_args.h):
  *
- *   - IP mode  (SAVE_INPUT_IPS)        : each string is an IPv4 address
- *                                        currently present on this host.
- *   - Zone mode (SAVE_INPUT_PORT_ZONES): a flat strv of paired entries
- *                                        [port_uuid_0, zone_0,
- *                                         port_uuid_1, zone_1, ...] where
+ *   - IP mode  (SAVE_IPS_OP)        : each string is an IPv4 address
+ *                                     currently present on this host.
+ *   - Zone mode (SAVE_PORT_ZONE_OP) : a flat strv of paired entries
+ *                                     [port_uuid_0, zone_0,
+ *                                      port_uuid_1, zone_1, ...] where
  *                                        each zone is a decimal CT zone
  *                                        currently owned by the named
  *                                        port still on this host. Length
@@ -388,8 +388,8 @@ static gboolean
 on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
                  const gchar *arg_data, gpointer user_data)
 {
-    LOG(INFO, "%s: Clear start (kind=%s)", __func__,
-        save_input_kind_to_string(ct_del_args.kind));
+    LOG(INFO, "%s: Clear start (op_type=%s)", __func__,
+        convert_save_mode_op_type_to_string(ct_del_args.op_type));
     GVariant *args, *var;
     gsize num_entries = 0;
     char **payload;
@@ -416,7 +416,7 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
     /* Zone-mode clear payload is paired (port_uuid, zone). Catch a
      * malformed odd-length strv up front so the parser doesn't have to
      * own this protocol-level invariant on its own. */
-    if (ct_del_args.kind == SAVE_INPUT_PORT_ZONES &&
+    if (ct_del_args.op_type == SAVE_PORT_ZONE_OP &&
         (num_entries % 2) != 0) {
         LOG(ERROR, "%s: zone-mode clear payload must be paired "
             "(port_uuid, zone); got odd length %zu",
@@ -425,11 +425,11 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
         return complete_on_clear(object, invocation);
     }
 
-    if (ct_del_args.kind == SAVE_INPUT_IPS) {
+    if (ct_del_args.op_type == SAVE_IPS_OP) {
         ips_on_host = create_hashtable_from_ip_list(
                           (const char **)payload, (int) num_entries);
         parse_ok = (ips_on_host != NULL);
-    } else {   /* SAVE_INPUT_PORT_ZONES */
+    } else {   /* SAVE_PORT_ZONE_OP */
         zones_on_host = create_hashtable_from_port_zone_pairs(
                             (const char **)payload, (int) num_entries);
         parse_ok = (zones_on_host != NULL);
@@ -438,13 +438,13 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
 
     if (!parse_ok) {
         LOG(ERROR, "%s: Failed to parse %s payload", __func__,
-            ct_del_args.kind == SAVE_INPUT_IPS ? "ips_on_host"
-                                              : "zones_on_host");
+            ct_del_args.op_type == SAVE_IPS_OP ? "ips_on_host"
+                                               : "zones_on_host");
         return complete_on_clear(object, invocation);
     }
 
     pthread_mutex_lock(&ct_del_args.mutex);
-    if (ct_del_args.kind == SAVE_INPUT_IPS) {
+    if (ct_del_args.op_type == SAVE_IPS_OP) {
         ct_del_args.ips_on_host = ips_on_host;
     } else {
         ct_del_args.zones_on_host = zones_on_host;
@@ -453,7 +453,7 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
     pthread_cond_signal(&ct_del_args.clear_called_cond);
     pthread_mutex_unlock(&ct_del_args.mutex);
 
-    if (ct_del_args.kind == SAVE_INPUT_IPS) {
+    if (ct_del_args.op_type == SAVE_IPS_OP) {
         LOG(INFO, "%s: Clear completed (received %zu IPs)",
             __func__, num_entries);
     } else {

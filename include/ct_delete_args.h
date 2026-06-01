@@ -25,8 +25,8 @@
  * successful migration.
  *
  * Real C tagged union over the active SAVE sub-mode:
- *   kind == SAVE_INPUT_IPS         -> ips_migrated / ips_on_host valid.
- *   kind == SAVE_INPUT_PORT_ZONES  -> zones_migrated / zones_on_host valid.
+ *   op_type == SAVE_IPS_OP        -> ips_migrated / ips_on_host valid.
+ *   op_type == SAVE_PORT_ZONE_OP  -> zones_migrated / zones_on_host valid.
  * (the two pairs overlay the same memory; only the active arm is set.)
  *
  * Ownership:
@@ -37,9 +37,9 @@
  *     the daemon is short-lived.
  */
 struct ct_delete_args {
-    pthread_t tid;             // Represents the thread ID
-    enum save_input_kind kind; // Active SAVE sub-mode; selects which arm
-                               // of the union below is valid.
+    pthread_t tid;                   // Represents the thread ID
+    enum save_mode_op_type op_type;  // Active SAVE sub-mode; selects which arm
+                                     // of the union below is valid.
 
     /* Active sub-mode state. Anonymous outer union forces mutual
      * exclusion (a SAVE mode is either IP-list-driven or port-zone-
@@ -48,12 +48,12 @@ struct ct_delete_args {
      *   ct_del_args.ips_migrated, ct_del_args.zones_on_host, etc.
      */
     union {
-        /* kind == SAVE_INPUT_IPS */
+        /* op_type == SAVE_IPS_OP */
         struct {
             GHashTable *ips_migrated;  // IP addresses migrated from this host
             GHashTable *ips_on_host;   // IP addresses currently on this host
         };
-        /* kind == SAVE_INPUT_PORT_ZONES */
+        /* op_type == SAVE_PORT_ZONE_OP */
         struct {
             GHashTable *zones_migrated; // CT zones migrated from this host
             GHashTable *zones_on_host;  // CT zones currently owned by ports on this host

@@ -47,25 +47,25 @@ typedef int (*dump_cb)(enum nf_conntrack_msg_type type,
  *
  * Real C tagged union over the active SAVE sub-mode (same shape as
  * ct_delete_args):
- *   kind == SAVE_INPUT_IPS         -> ips_migrated / ips_on_host valid.
- *   kind == SAVE_INPUT_PORT_ZONES  -> zones_migrated / zones_on_host valid.
+ *   op_type == SAVE_IPS_OP        -> ips_migrated / ips_on_host valid.
+ *   op_type == SAVE_PORT_ZONE_OP  -> zones_migrated / zones_on_host valid.
  * (the two pairs overlay the same memory; only the active arm is set.)
  *
  * ct_store is the per-pass output: CT entries that survive the filter are
  * stolen into it and later iterated for NFCT_Q_DESTROY.
  */
 struct delete_ct_dump_cb_args {
-    enum save_input_kind kind; // selects which arm of the union below is valid
+    enum save_mode_op_type op_type; // selects which arm of the union below is valid
 
     /* Active sub-mode state, mirroring struct ct_delete_args. Anonymous
      * inner structs keep field access flat (cb_args->ips_migrated etc.). */
     union {
-        /* kind == SAVE_INPUT_IPS */
+        /* op_type == SAVE_IPS_OP */
         struct {
             GHashTable *ips_migrated; // IPs for which CT entries have been migrated
             GHashTable *ips_on_host;  // IPs that are currently present on the host
         };
-        /* kind == SAVE_INPUT_PORT_ZONES */
+        /* op_type == SAVE_PORT_ZONE_OP */
         struct {
             GHashTable *zones_migrated; // CT zones for which entries have been migrated
             GHashTable *zones_on_host;  // CT zones currently owned by ports on this host
@@ -157,17 +157,17 @@ is_zone_in_hashtable(uint16_t zone, GHashTable *ht)
  * Common to both modes:
  *  - source and destination IPv4 addresses are set.
  *
- * IP mode (SAVE_INPUT_IPS):
+ * IP mode (SAVE_IPS_OP):
  *  - Zone information is not present (legacy paranoid check kept verbatim).
  *
- * Zone mode (SAVE_INPUT_PORT_ZONES):
+ * Zone mode (SAVE_PORT_ZONE_OP):
  *  - At least one of ATTR_ZONE / ATTR_ORIG_ZONE is set so the dispatcher
  *    has a key to filter on.
  *
  * Args:
  *   @type nf message type.
  *   @ct pointer to the conntrack entry.
- *   @kind active SAVE sub-mode.
+ *   @op_type active SAVE sub-mode.
  *
  * Returns:
  *   true in case the CT entry passes the above mentioned checks,
@@ -175,7 +175,7 @@ is_zone_in_hashtable(uint16_t zone, GHashTable *ht)
  */
 static bool
 validate_ct_entry(enum nf_conntrack_msg_type type, const struct nf_conntrack *ct,
-                  enum save_input_kind kind)
+                  enum save_mode_op_type op_type)
 {
     if (ct == NULL) {
         LOG(ERROR, "%s: ct is NULL", __func__);
@@ -194,7 +194,7 @@ validate_ct_entry(enum nf_conntrack_msg_type type, const struct nf_conntrack *ct
         return false;
     }
 
-    if (kind == SAVE_INPUT_IPS) {
+    if (op_type == SAVE_IPS_OP) {
         if (nfct_attr_is_set(ct, ATTR_ZONE) > 0 ||
             nfct_attr_is_set(ct, ATTR_ORIG_ZONE) > 0 ||
             nfct_attr_is_set(ct, ATTR_REPL_ZONE) > 0) {
@@ -253,11 +253,11 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
 
     save_config = data;
 
-    if (!validate_ct_entry(type, ct, save_config->kind)) {
+    if (!validate_ct_entry(type, ct, save_config->op_type)) {
         return NFCT_CB_CONTINUE;
     }
 
-    if (save_config->kind == SAVE_INPUT_IPS) {
+    if (save_config->op_type == SAVE_IPS_OP) {
         src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
         dst_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_DST);
 
@@ -275,7 +275,7 @@ conntrack_dump_callback(enum nf_conntrack_msg_type type,
     }
 
     if (is_entry_useful) {
-        update_conntrack_store(conn_store, ct, type, save_config->kind);
+        update_conntrack_store(conn_store, ct, type, save_config->op_type);
     }
 
     return NFCT_CB_CONTINUE;
@@ -351,7 +351,7 @@ get_conntrack_dump(struct nfct_handle *handle,
  *
  * mnl_cb_run takes a single void *user_data; this struct bundles the
  * SAVE-mode config pointer with the stop_flag so the callback can
- * dispatch on kind and exit gracefully.
+ * dispatch on op_type and exit gracefully.
  */
 struct events_cb_ctx {
     struct save_mode_config *save_config;
@@ -414,12 +414,12 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
 
     nfct_nlmsg_parse(nlh, ct);
 
-    if (!validate_ct_entry(type, ct, ctx->save_config->kind)) {
+    if (!validate_ct_entry(type, ct, ctx->save_config->op_type)) {
         goto out;
     }
 
     /* BPF couldn't pre-filter zone-mode events, so do it in-callback. */
-    if (ctx->save_config->kind == SAVE_INPUT_PORT_ZONES) {
+    if (ctx->save_config->op_type == SAVE_PORT_ZONE_OP) {
         uint16_t zone;
         if (!ct_get_migration_zone(ct, &zone)) {
             LOG(WARNING, "%s: event has no zone attribute; skipping.",
@@ -431,7 +431,7 @@ conntrack_events_callback(const struct nlmsghdr *nlh, void *data)
         }
     }
 
-    update_conntrack_store(conn_store, ct, type, ctx->save_config->kind);
+    update_conntrack_store(conn_store, ct, type, ctx->save_config->op_type);
 
 out:
     nfct_destroy(ct);
@@ -539,7 +539,7 @@ listen_for_conntrack_events(struct mnl_socket *nl,
     // zone, so zone-mode threads run unfiltered and the callback does the
     // zone match in-process. filter / filter_attach_ret live only inside
     // this branch -- the zone path never touches them.
-    if (save_config->kind == SAVE_INPUT_IPS) {
+    if (save_config->op_type == SAVE_IPS_OP) {
         struct nfct_filter *filter =
             create_nfct_filter(save_config->ips_to_migrate, is_src_filter);
         int filter_attach_ret = nfct_filter_attach(fd, filter);
@@ -807,11 +807,11 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
 
     cb_args = data;
 
-    if (!validate_ct_entry(type, ct, cb_args->kind)) {
+    if (!validate_ct_entry(type, ct, cb_args->op_type)) {
         return NFCT_CB_CONTINUE;
     }
 
-    if (cb_args->kind == SAVE_INPUT_IPS) {
+    if (cb_args->op_type == SAVE_IPS_OP) {
         struct in_addr *src_addr, *dst_addr;
 
         src_addr = (struct in_addr *)nfct_get_attr(ct, ATTR_ORIG_IPV4_SRC);
@@ -826,7 +826,7 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
                                                  cb_args->ips_migrated);
         in_on_host  = is_src_or_dst_in_hashtable(src_addr, dst_addr,
                                                  cb_args->ips_on_host);
-    } else {   /* SAVE_INPUT_PORT_ZONES */
+    } else {   /* SAVE_PORT_ZONE_OP */
         uint16_t zone;
         if (!ct_get_migration_zone(ct, &zone)) {
             LOG(WARNING, "%s: delete-dump entry has no zone attribute; "
@@ -913,7 +913,7 @@ ct_destroy_g_wrapper(void *ct)
  *
  * Args:
  *   @handle handle to the netlink socket.
- *   @args   delete-thread arguments. Mode-aware via args->kind.
+ *   @args   delete-thread arguments. Mode-aware via args->op_type.
  */
 static void
 _delete_ct_entries(struct nfct_handle *handle, struct ct_delete_args *args)
@@ -929,17 +929,17 @@ _delete_ct_entries(struct nfct_handle *handle, struct ct_delete_args *args)
 
     /* Take conntrack dump to get the entries to be deleted. Both
      * structs now use a tagged union for the per-mode pointers, so
-     * we can only touch the arm selected by @kind. Copying both arms
+     * we can only touch the arm selected by @op_type. Copying both arms
      * would (a) silently overwrite the active arm with NULLs from the
      * inactive arm via the union overlap and (b) lie about ownership. */
-    cb_args.kind     = args->kind;
+    cb_args.op_type  = args->op_type;
     cb_args.ct_store = ct_store;
-    switch (args->kind) {
-    case SAVE_INPUT_IPS:
+    switch (args->op_type) {
+    case SAVE_IPS_OP:
         cb_args.ips_migrated = args->ips_migrated;
         cb_args.ips_on_host  = args->ips_on_host;
         break;
-    case SAVE_INPUT_PORT_ZONES:
+    case SAVE_PORT_ZONE_OP:
         cb_args.zones_migrated = args->zones_migrated;
         cb_args.zones_on_host  = args->zones_on_host;
         break;
@@ -952,9 +952,9 @@ _delete_ct_entries(struct nfct_handle *handle, struct ct_delete_args *args)
         goto finish;
     }
 
-    LOG(INFO, "%s: starting conntrack entry delete (kind=%s). "
+    LOG(INFO, "%s: starting conntrack entry delete (op_type=%s). "
         "Entries to delete %d", __func__,
-        save_input_kind_to_string(args->kind),
+        convert_save_mode_op_type_to_string(args->op_type),
         g_hash_table_size(cb_args.ct_store));
 
     failed = success = 0;
@@ -969,9 +969,9 @@ _delete_ct_entries(struct nfct_handle *handle, struct ct_delete_args *args)
         }
     }
 
-    LOG(INFO, "%s: Finished conntrack entry delete (kind=%s). "
+    LOG(INFO, "%s: Finished conntrack entry delete (op_type=%s). "
         "Success: %d, Failed: %d", __func__,
-        save_input_kind_to_string(args->kind), success, failed);
+        convert_save_mode_op_type_to_string(args->op_type), success, failed);
 
 finish:
     if (ct_store != NULL) {
@@ -1013,8 +1013,8 @@ delete_ct_entries(void *data)
 
     ct_del_args = data;
 
-    LOG(INFO, "%s: Starting conntrack delete thread (kind=%s)", __func__,
-        save_input_kind_to_string(ct_del_args->kind));
+    LOG(INFO, "%s: Starting conntrack delete thread (op_type=%s)", __func__,
+        convert_save_mode_op_type_to_string(ct_del_args->op_type));
     LOG(INFO, "%s: waiting on clear condition.", __func__);
     pthread_mutex_lock(&ct_del_args->mutex);
     while (!ct_del_args->clear_called) {

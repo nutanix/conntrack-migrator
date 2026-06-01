@@ -44,52 +44,55 @@
 
 /**
  * Sub-mode tag: tells the rest of the daemon which SAVE-mode CLI layout
- * was detected from argv.
+ * was detected from argv. Selects between IP-mode (filter CT entries by
+ * IPv4 src/dst) and zone-mode (filter by CT zone).
  */
-enum save_input_kind {
-    SAVE_INPUT_IPS,
-    SAVE_INPUT_PORT_ZONES
+enum save_mode_op_type {
+    SAVE_IPS_OP,
+    SAVE_PORT_ZONE_OP
 };
 
 /**
  * Sub-mode tag: tells the rest of the daemon which LOAD-mode CLI layout
- * was detected from argv.
+ * was detected from argv. Selects between IP-mode (legacy v1.0
+ * pass-through, no zone awareness) and zone-mode (apply src->dst zone
+ * rewrite before programming each CT entry).
  */
-enum load_input_kind {
-    LOAD_INPUT_LEGACY,
-    LOAD_INPUT_PORT_ZONES
+enum load_mode_op_type {
+    LOAD_IPS_OP,
+    LOAD_PORT_ZONE_OP
 };
 
 /**
- * SAVE-mode runtime config bundle. Real C tagged union over @kind:
- *   kind == SAVE_INPUT_IPS         -> ips_to_migrate is the active arm.
- *   kind == SAVE_INPUT_PORT_ZONES  -> zones_to_migrate is the active arm.
+ * SAVE-mode runtime config bundle. Real C tagged union over @op_type:
+ *   op_type == SAVE_IPS_OP        -> ips_to_migrate is the active arm.
+ *   op_type == SAVE_PORT_ZONE_OP  -> zones_to_migrate is the active arm.
  * The active hashtable is owned by save_mode_config and freed by
- * destroy_save_mode_config (which dispatches on @kind because the two
+ * destroy_save_mode_config (which dispatches on @op_type because the two
  * pointer fields now overlay the same memory). Anonymous union so call
  * sites can keep using save_config->ips_to_migrate /
  * save_config->zones_to_migrate directly.
  */
 struct save_mode_config {
-    enum save_input_kind kind;
+    enum save_mode_op_type op_type;
     union {
-        GHashTable *ips_to_migrate;     /* kind == SAVE_INPUT_IPS */
-        GHashTable *zones_to_migrate;   /* kind == SAVE_INPUT_PORT_ZONES */
+        GHashTable *ips_to_migrate;     /* op_type == SAVE_IPS_OP       */
+        GHashTable *zones_to_migrate;   /* op_type == SAVE_PORT_ZONE_OP */
     };
 };
 
 /**
  * LOAD-mode runtime config bundle. Tagged union over CLI sub-mode:
- *   kind == LOAD_INPUT_LEGACY      -> src_dst_zone_map is NULL; pass-through.
- *   kind == LOAD_INPUT_PORT_ZONES  -> src_dst_zone_map is uint16->uint16
- *                                     map, keyed by old_ct_zone (source
- *                                     side), value is the new_ct_zone
- *                                     (destination side) to write before
- *                                     programming each CT entry.
+ *   op_type == LOAD_IPS_OP        -> src_dst_zone_map is NULL; pass-through.
+ *   op_type == LOAD_PORT_ZONE_OP  -> src_dst_zone_map is uint16->uint16
+ *                                    map, keyed by old_ct_zone (source
+ *                                    side), value is the new_ct_zone
+ *                                    (destination side) to write before
+ *                                    programming each CT entry.
  * Owned by load_mode_config and freed by destroy_load_mode_config.
  */
 struct load_mode_config {
-    enum load_input_kind kind;
+    enum load_mode_op_type op_type;
     GHashTable *src_dst_zone_map;
 };
 
@@ -101,7 +104,7 @@ struct load_mode_config {
  * grep backwards for the bootstrap banner.
  */
 const char *
-save_input_kind_to_string(enum save_input_kind kind);
+convert_save_mode_op_type_to_string(enum save_mode_op_type op_type);
  
 GHashTable *
 create_hashtable_from_ip_list(const char *const [], int);
@@ -130,7 +133,7 @@ parse_ct_zone(const char *, uint16_t *);
  * slot where 0 means "VM has no IPv4 NICs"; see the graceful
  * early-exit in start_in_save_mode). min_value = 1 also subsumes the
  * "n <= 0 silent fallback" branches that used to live in
- * detect_save_input_kind.
+ * detect_save_mode_op_type.
  *
  * Designed for CLI argv slots where every existing caller treated
  * bad input as a fatal error anyway. Folding the errx() into the

@@ -24,16 +24,16 @@
 #include "data_template.h"
 
 /**
- * Allocates a new data_template sized to @kind.
+ * Allocates a new data_template sized to @op_type.
  *
- * See the header for the per-kind wire-format contract.
+ * See the header for the per-op_type wire-format contract.
  *
  * Returns:
  *   pointer to the allocated memory if success.
  *   In case of error, terminates the process.
  */
 struct data_template *
-data_template_new(enum save_input_kind kind)
+data_template_new(enum save_mode_op_type op_type)
 {
     struct data_template *data_tmpl;
     int i;
@@ -44,7 +44,7 @@ data_template_new(enum save_input_kind kind)
      * Zone mode advertises every slot the current binary understands.
      * The trailing slots are gated off in IP mode by is_zone_only_slot()
      * (conntrack_entry.c) so they are never set in any bitmap either. */
-    num_bits = (kind == SAVE_INPUT_IPS) ? CT_ATTR_LEGACY_NUM_BITS
+    num_bits = (op_type == SAVE_IPS_OP) ? CT_ATTR_LEGACY_NUM_BITS
                                         : CT_ATTR_MAX;
 
     data_tmpl = g_malloc0(sizeof(struct data_template));

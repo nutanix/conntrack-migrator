@@ -170,12 +170,12 @@ void
 conntrack_entry_destroy_g_wrapper(void *);
 
 struct conntrack_entry *
-conntrack_entry_from_nf_conntrack(const struct nf_conntrack *, enum save_input_kind);
+conntrack_entry_from_nf_conntrack(const struct nf_conntrack *, enum save_mode_op_type);
 
 struct conntrack_entry *
 get_conntrack_entry_from_update(struct conntrack_entry *,
                                 const struct nf_conntrack *,
-                                enum save_input_kind);
+                                enum save_mode_op_type);
 
 bool
 is_set_in_bitmap(uint32_t *, uint8_t);
