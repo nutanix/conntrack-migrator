@@ -190,9 +190,9 @@ START_TEST(test_marshal_for_zone)
     struct conntrack_store *store;
     store = create_conntrack_store();
 
-    /* A realistic zone-mode entry: original 5-tuple + CT zone + the NAT'd
-     * reply 5-tuple. marshal is schema-agnostic (it copies the bitmap and
-     * data blob verbatim). */
+    // A realistic zone-mode entry: original 5-tuple + CT zone + the NAT'd
+    // reply 5-tuple. marshal is schema-agnostic (it copies the bitmap and
+    // data blob verbatim).
     uint8_t entry_data[26]; // 4+4 (orig ips) + 2 (zone) + 2+2 (orig ports)
                             // + 4+4 (repl ips) + 2+2 (repl ports).
     uint8_t *p;
@@ -239,7 +239,7 @@ START_TEST(test_marshal_for_zone)
                     ((BITMAP_NUM_WORDS * WORD_SIZE) +
                      sizeof(entry_data));                     // one entry
     ck_assert(exp_data_size == data_size);
-
+    // check the values written in the buffer
     // Check 1: total size is correct.
     uint32_t read_data_size;
     memcpy(&read_data_size, buffer, sizeof(read_data_size));
@@ -268,7 +268,7 @@ START_TEST(test_marshal_for_zone)
     ck_assert(memcmp(buffer, entry_data, sizeof(entry_data)) == 0);
     buffer += sizeof(entry_data);
 
-    // Check we've reached end of buffer.
+    // Check we've reached end of buffer
     ck_assert(buffer == buffer_end);
 }
 END_TEST
