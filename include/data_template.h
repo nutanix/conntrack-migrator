@@ -15,6 +15,8 @@
 #ifndef DATA_TEMPLATE_H
 #define DATA_TEMPLATE_H
 
+#include "common.h"  /* for enum save_mode_op_type */
+
 /**
  * This struct instructs the receiving end how to parse the conntrack
  * entries received. num_bits field instructs how many attributes are
@@ -27,8 +29,22 @@ struct data_template {
     uint32_t payload_size; // size of payload array
 };
 
+/**
+ * Allocates a wire-format data_template sized to @op_type.
+ *
+ * SAVE_IPS_OP        -> num_bits = CT_ATTR_LEGACY_NUM_BITS (21).
+ *                       Byte-identical to what a v1.0 SAVE binary
+ *                       emits, so a v1.0 LOAD receiver remains a
+ *                       valid migration target.
+ * SAVE_PORT_ZONE_OP  -> num_bits = CT_ATTR_MAX. Includes the
+ *                       appended NAT'd-reply slots that only
+ *                       zone-mode payloads ever set.
+ *
+ * Caller owns the returned pointer and must free with
+ * data_template_destroy().
+ */
 struct data_template *
-data_template_new(void);
+data_template_new(enum save_mode_op_type op_type);
 
 void
 data_template_destroy(struct data_template *);

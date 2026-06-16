@@ -8,6 +8,7 @@
  */
 
 #include <stdlib.h>
+#include <string.h>
 #include <check.h>
 
 #include <glib.h>
@@ -41,6 +42,10 @@ enum nf_conntrack_attr ct_entry_attr_to_nf_attr[CT_ATTR_MAX] =
     [CT_ATTR_MARK] = ATTR_MARK,
     [CT_ATTR_STATUS] = ATTR_STATUS,
     [CT_ATTR_LABEL] = ATTR_CONNLABELS,
+    [CT_ATTR_L3_SRC_V4_REPL] = ATTR_REPL_IPV4_SRC,
+    [CT_ATTR_L3_DST_V4_REPL] = ATTR_REPL_IPV4_DST,
+    [CT_ATTR_L4_SRC_PORT_REPL] = ATTR_REPL_PORT_SRC,
+    [CT_ATTR_L4_DST_PORT_REPL] = ATTR_REPL_PORT_DST,
 };
 
 int ct_entry_attr_to_size[CT_ATTR_MAX] =
@@ -65,7 +70,11 @@ int ct_entry_attr_to_size[CT_ATTR_MAX] =
     [CT_ATTR_TIMEOUT] = UINT32_T_SIZE,
     [CT_ATTR_MARK] = UINT32_T_SIZE,
     [CT_ATTR_STATUS] = UINT32_T_SIZE,
-    [CT_ATTR_LABEL] = UINT32_T_SIZE * CT_LABEL_NUM_WORDS
+    [CT_ATTR_LABEL] = UINT32_T_SIZE * CT_LABEL_NUM_WORDS,
+    [CT_ATTR_L3_SRC_V4_REPL] = UINT32_T_SIZE,
+    [CT_ATTR_L3_DST_V4_REPL] = UINT32_T_SIZE,
+    [CT_ATTR_L4_SRC_PORT_REPL] = UINT16_T_SIZE,
+    [CT_ATTR_L4_DST_PORT_REPL] = UINT16_T_SIZE
 };
 
 struct data_template *
@@ -235,7 +244,7 @@ START_TEST(test_unmarshal_conntrack_entry_unsupported_bit)
                 (1 << CT_ATTR_STATUS)    |
                 (1 << CT_ATTR_L3_SRC_V4) |
                 (1 << CT_ATTR_L3_DST_V4) |
-                (1 << (CT_ATTR_MAX + 1)); // this is an unsupported bit.
+                (1 << CT_ATTR_MAX);       // this is an unsupported bit.
                                           // assume it to be ATTR_DNAT_IPV4
 
     bitmap[1] = 0;
@@ -262,7 +271,8 @@ START_TEST(test_unmarshal_conntrack_entry_unsupported_bit)
 
     bytes_read = unmarshal_conntrack_entry(data, tmpl, ct, NULL);
 
-    ck_assert(bytes_read == 28);
+    /* 8 (bitmap) + 5x4 (known attrs) + 4 (skipped unsupported attr) = 32. */
+    ck_assert(bytes_read == 32);
     ck_assert(nfct_get_attr_u32(ct, ATTR_IPV4_SRC) == 2);
     ck_assert(nfct_get_attr_u32(ct, ATTR_IPV4_DST) == 3);
     ck_assert(nfct_get_attr_u32(ct, ATTR_TIMEOUT) == 4);
@@ -271,6 +281,72 @@ START_TEST(test_unmarshal_conntrack_entry_unsupported_bit)
     ck_assert(nfct_attr_is_set(ct, ATTR_DNAT_IPV4) == 0); // this should not
                                                           // be set since it
                                                           // is unsupported.
+}
+END_TEST
+
+START_TEST(test_unmarshal_conntrack_entry_for_zone)
+{
+    /* A zone-mode payload: original 5-tuple + CT zone + the NAT'd reply
+     * 5-tuple. */
+    uint32_t databuf[9]; // 36 bytes, 4-byte aligned; we use 34.
+    uint8_t *data = (uint8_t *)databuf;
+    uint8_t *p;
+    uint32_t bytes_read;
+    struct data_template *tmpl;
+    struct nf_conntrack *ct;
+
+    uint32_t bitmap[2];
+    uint32_t src_ip = 2;
+    uint32_t dst_ip = 3;
+    uint16_t zone = 10;
+    uint16_t src_port = 1024;
+    uint16_t dst_port = 9090;
+    uint32_t repl_src_ip = 4;
+    uint32_t repl_dst_ip = 5;
+    uint16_t repl_src_port = 5555;
+    uint16_t repl_dst_port = 6666;
+
+    bitmap[0] = (1 << CT_ATTR_L3_SRC_V4)        |
+                (1 << CT_ATTR_L3_DST_V4)        |
+                (1 << CT_ATTR_ZONE)             |
+                (1 << CT_ATTR_L4_SRC_PORT)      |
+                (1 << CT_ATTR_L4_DST_PORT)      |
+                (1 << CT_ATTR_L3_SRC_V4_REPL)   |
+                (1 << CT_ATTR_L3_DST_V4_REPL)   |
+                (1 << CT_ATTR_L4_SRC_PORT_REPL) |
+                (1 << CT_ATTR_L4_DST_PORT_REPL);
+    bitmap[1] = 0;
+
+    // Bitmap first, then the attribute values in ascending bit order.
+    p = data;
+    memcpy(p, bitmap, sizeof(bitmap));             p += sizeof(bitmap);
+    memcpy(p, &src_ip, sizeof(src_ip));             p += sizeof(src_ip);
+    memcpy(p, &dst_ip, sizeof(dst_ip));             p += sizeof(dst_ip);
+    memcpy(p, &zone, sizeof(zone));                 p += sizeof(zone);
+    memcpy(p, &src_port, sizeof(src_port));         p += sizeof(src_port);
+    memcpy(p, &dst_port, sizeof(dst_port));         p += sizeof(dst_port);
+    memcpy(p, &repl_src_ip, sizeof(repl_src_ip));   p += sizeof(repl_src_ip);
+    memcpy(p, &repl_dst_ip, sizeof(repl_dst_ip));   p += sizeof(repl_dst_ip);
+    memcpy(p, &repl_src_port, sizeof(repl_src_port)); p += sizeof(repl_src_port);
+    memcpy(p, &repl_dst_port, sizeof(repl_dst_port)); p += sizeof(repl_dst_port);
+
+    tmpl = create_template();
+    ct = nfct_new();
+
+    bytes_read = unmarshal_conntrack_entry(data, tmpl, ct, NULL);
+
+    /* 8 (bitmap) + 4+4 (orig ips) + 2 (zone) + 2+2 (orig ports)
+     * + 4+4 (repl ips) + 2+2 (repl ports) = 34. */
+    ck_assert(bytes_read == 34);
+    ck_assert(nfct_get_attr_u32(ct, ATTR_IPV4_SRC) == src_ip);
+    ck_assert(nfct_get_attr_u32(ct, ATTR_IPV4_DST) == dst_ip);
+    ck_assert(nfct_get_attr_u16(ct, ATTR_ZONE) == zone);
+    ck_assert(nfct_get_attr_u16(ct, ATTR_PORT_SRC) == src_port);
+    ck_assert(nfct_get_attr_u16(ct, ATTR_PORT_DST) == dst_port);
+    ck_assert(nfct_get_attr_u32(ct, ATTR_REPL_IPV4_SRC) == repl_src_ip);
+    ck_assert(nfct_get_attr_u32(ct, ATTR_REPL_IPV4_DST) == repl_dst_ip);
+    ck_assert(nfct_get_attr_u16(ct, ATTR_REPL_PORT_SRC) == repl_src_port);
+    ck_assert(nfct_get_attr_u16(ct, ATTR_REPL_PORT_DST) == repl_dst_port);
 }
 END_TEST
 
@@ -290,6 +366,7 @@ unmarshal_suite(void)
     tcase_add_test(tc_core, test_unmarshal_conntrack_entry);
     tcase_add_test(tc_core, test_unmarshal_conntrack_entry_with_label);
     tcase_add_test(tc_core, test_unmarshal_conntrack_entry_unsupported_bit);
+    tcase_add_test(tc_core, test_unmarshal_conntrack_entry_for_zone);
 
     suite_add_tcase(s, tc_core);
 

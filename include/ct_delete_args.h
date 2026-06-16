@@ -21,13 +21,45 @@
 
 /**
  * Represents the arguments to be passed to the thread responsible
- * for cleanining up the conntrack entries in source hypervisor upon
+ * for cleaning up the conntrack entries in source hypervisor upon
  * successful migration.
+ *
+ * Real C tagged union over the active SAVE sub-mode:
+ *   op_type == SAVE_IPS_OP        -> ips_migrated / ips_on_host valid.
+ *   op_type == SAVE_PORT_ZONE_OP  -> zones_migrated / zones_on_host valid.
+ * (the two pairs overlay the same memory; only the active arm is set.)
+ *
+ * Ownership:
+ *   - ips_migrated / zones_migrated are aliases into save_mode_config and
+ *     must not be freed by the delete thread.
+ *   - ips_on_host / zones_on_host are built by on_clear and consumed by
+ *     the delete thread; they are released alongside process exit since
+ *     the daemon is short-lived.
  */
 struct ct_delete_args {
-    pthread_t tid;             // Represents the thread ID
-    GHashTable *ips_migrated;  // IP addresses migrated from this host
-    GHashTable *ips_on_host;   // IP addresses currently on this host
+    pthread_t tid;                   // Represents the thread ID
+    enum save_mode_op_type op_type;  // Active SAVE sub-mode; selects which arm
+                                     // of the union below is valid.
+
+    /* Active sub-mode state. Anonymous outer union forces mutual
+     * exclusion (a SAVE mode is either IP-list-driven or port-zone-
+     * driven, never both), but the inner structs are anonymous so
+     * field access stays flat:
+     *   ct_del_args.ips_migrated, ct_del_args.zones_on_host, etc.
+     */
+    union {
+        /* op_type == SAVE_IPS_OP */
+        struct {
+            GHashTable *ips_migrated;  // IP addresses migrated from this host
+            GHashTable *ips_on_host;   // IP addresses currently on this host
+        };
+        /* op_type == SAVE_PORT_ZONE_OP */
+        struct {
+            GHashTable *zones_migrated; // CT zones migrated from this host
+            GHashTable *zones_on_host;  // CT zones currently owned by ports on this host
+        };
+    };
+
     bool clear_called;         // Flag to indicate if clear DBUS IPC is invoked
     pthread_mutex_t mutex;            // mutex for the condition var
     pthread_cond_t clear_called_cond; // Condition to wait until the clear IPC is called

@@ -36,6 +36,7 @@ Following libraries are required and can be easily installed using yum.
  - libnetfilter_conntrack, libnetfilter_conntrack-devel
  - libmnl, libmnl-devel
  - glib2, glib2-devel
+ - libuuid, libuuid-devel
  - gcc, make, gdbus-codegen
 
 ### Compile

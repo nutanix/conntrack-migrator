@@ -11,6 +11,9 @@
 #include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/syscall.h>
 
 #include <check.h>
 #include <glib.h>
@@ -47,9 +50,18 @@ int batch_size = 0;
 int load_size = 0;
 int fail_netlink = false;
 
+// --- hooks used by the zone-mode coverage below ---
+static enum save_mode_op_type last_save_op_type;        // captured in data_template_new
+int last_appended_zone = -1;                            // captured in append_ct_to_batch (-1 = never)
+bool load_zone_enabled = false;                         // make unmarshal stamp ATTR_ZONE
+uint16_t load_zone = 0;
+enum save_mode_op_type next_save_op_type = SAVE_IPS_OP; // dbus_targs.save_op_type for the next thread
+struct load_mode_config *next_load_config = NULL;       // dbus_targs.load_config for the next thread
+
 struct data_template *
-data_template_new(void)
+data_template_new(enum save_mode_op_type op_type)
 {
+    last_save_op_type = op_type;
     return NULL;
 }
 
@@ -61,13 +73,31 @@ data_template_destroy(struct data_template *data_tmpl)
 
 // this is used in CLEAR ipc only.
 GHashTable *
-create_hashtable_from_ip_list(const char *ip_list[],  int num_ips)
+create_hashtable_from_ip_list(const char *const ip_list[],  int num_ips)
 {
     if (fail_clear) {
         return NULL;
     }
 
     return g_hash_table_new(g_direct_hash, g_direct_equal);
+}
+
+// zone-mode CLEAR path (reuses the same fail_clear knob)
+GHashTable *
+create_hashtable_from_port_zone_pairs(const char *port_zone_strv[],
+                                      int num_entries)
+{
+    if (fail_clear) {
+        return NULL;
+    }
+
+    return g_hash_table_new(g_direct_hash, g_direct_equal);
+}
+
+const char *
+convert_save_mode_op_type_to_string(enum save_mode_op_type op_type)
+{
+    return op_type == SAVE_IPS_OP ? "ips" : "port_zone";
 }
 
 // This is used in save ipc only.
@@ -112,6 +142,9 @@ uint32_t
 unmarshal_conntrack_entry(void *start, struct data_template *data_tmpl,
                           struct nf_conntrack *ct, uint32_t **label)
 {
+    if (load_zone_enabled) {
+        nfct_set_attr_u16(ct, ATTR_ZONE, load_zone);
+    }
     return sizeof(uint32_t);
 }
 
@@ -121,13 +154,16 @@ create_batch_conntrack(struct mnl_socket *nl, struct mnl_nlmsg_batch *batch)
     return -1;
 }
 
-void
+int
 append_ct_to_batch(char *send_buf, struct nf_conntrack *ct,
                    uint32_t *label, int seq)
 {
     if (batch_size > 0) {
-        return;
+        return 0;
     }
+
+    last_appended_zone = nfct_attr_is_set(ct, ATTR_ZONE)
+                             ? (int) nfct_get_attr_u16(ct, ATTR_ZONE) : -1;
 
     // For 0 batch_size, append one entry to it.
     struct nlmsghdr *nlh;
@@ -147,6 +183,7 @@ append_ct_to_batch(char *send_buf, struct nf_conntrack *ct,
     nfct_nlmsg_build(nlh, ct);
 
     batch_size++;
+    return 0;
 }
 
 int
@@ -157,6 +194,24 @@ mnl_socket_bind(struct mnl_socket *nl, unsigned int groups, pid_t pid)
     }
 
     return 0;
+}
+
+/*
+ * SO_RCVBUFFORCE (set in connect_to_netlink_conntrack) needs CAP_NET_ADMIN,
+ * which the unprivileged test process does not have. Fake just that one option
+ * so netlink socket setup succeeds and on_load can reach the zone-rewrite
+ * logic; the kernel-facing send (create_batch_conntrack) is stubbed, so nothing
+ * actually touches the kernel. Every other setsockopt call (GIO/D-Bus, libmnl
+ * NETLINK_NO_ENOBUFS) is forwarded to the real syscall so it behaves normally.
+ */
+int
+setsockopt(int fd, int level, int optname, const void *optval, socklen_t optlen)
+{
+    if (level == SOL_SOCKET && optname == SO_RCVBUFFORCE) {
+        return 0;
+    }
+
+    return syscall(SYS_setsockopt, fd, level, optname, optval, optlen);
 }
 //============================================================================
 
@@ -292,10 +347,15 @@ create_dbus_thread(const char *helper_id, int mode, bool *stop_flag)
     struct dbus_targs *args = NULL;
     int ret;
 
-    args = g_malloc(sizeof(struct dbus_targs));
+    args = g_malloc0(sizeof(struct dbus_targs));
     args->helper_id = helper_id;
     args->stop_flag = stop_flag;
     args->mode = mode;
+    args->save_op_type = next_save_op_type;
+    args->load_config = next_load_config;
+    args->should_quit = false;
+    args->loop = NULL;
+    pthread_mutex_init(&args->loop_mu, NULL);
 
     ret = pthread_create(&args->tid, NULL, dbus_server_init, args);
     ck_assert_msg(ret == 0, "Failed to create dbus thread. %s",
@@ -449,6 +509,7 @@ START_TEST(test_src_save_pass_clear_pass)
     ck_assert(ret->size != 0);
     ck_assert_msg(strcmp("save", ret->data) == 0,
                   "expected: save, got: %s\n", ret->data);
+    ck_assert(last_save_op_type == SAVE_IPS_OP); // on_save forwarded IP mode
 
     // prepare ct_del_args
     ct_del_args.clear_called = false;
@@ -547,6 +608,186 @@ START_TEST(test_dst_load_pass)
 }
 END_TEST
 
+START_TEST(test_src_save_zone_pass)
+{
+    const char address[] = "unix:path=/tmp/dbus/system_bus_socket";
+    const char helper_id[] = "helper_test_save";
+    bool stop_flag = false;
+    GDBusConnection *client;
+    GDBusProxy *proxy;
+    struct save_ret *ret;
+
+    client = create_client(address);
+
+    next_save_op_type = SAVE_PORT_ZONE_OP;   // configure zone-mode SAVE
+    pthread_t tid = create_dbus_thread(helper_id, SAVE_MODE, &stop_flag);
+    next_save_op_type = SAVE_IPS_OP;          // restore default for other tests
+    sleep(2);
+
+    proxy = get_dbus_vmstate_proxy(client);
+    fail_marshal = false;
+    last_save_op_type = SAVE_IPS_OP;
+    ret = call_save_for_test(proxy);
+    ck_assert(ret->data != NULL);
+    ck_assert(last_save_op_type == SAVE_PORT_ZONE_OP); // on_save threaded zone mode
+
+    // drive an IP-mode clear so the server loop quits and we can join
+    ct_del_args.op_type = SAVE_IPS_OP;
+    proxy = get_lmct_mgmt_proxy(client);
+    GStrv ips = g_new(char *, 2);
+    ips[0] = g_strdup("1.2.3.4");
+    ips[1] = NULL;
+    fail_clear = false;
+    call_clear_for_test(proxy, ips);
+
+    pthread_join(tid, NULL);
+}
+END_TEST
+
+START_TEST(test_src_clear_zone_pass)
+{
+    const char address[] = "unix:path=/tmp/dbus/system_bus_socket";
+    const char helper_id[] = "helper_test_save";
+    bool stop_flag = false;
+    GDBusConnection *client;
+    GDBusProxy *proxy;
+
+    client = create_client(address);
+    pthread_t tid = create_dbus_thread(helper_id, SAVE_MODE, &stop_flag);
+    sleep(2);
+
+    ct_del_args.op_type = SAVE_PORT_ZONE_OP;   // select zone clear path
+    ct_del_args.clear_called = false;
+
+    proxy = get_lmct_mgmt_proxy(client);
+    GStrv pz = g_new(char *, 3);               // paired (port_uuid, zone)
+    pz[0] = g_strdup("port-uuid-1");
+    pz[1] = g_strdup("5");
+    pz[2] = NULL;
+
+    fail_clear = false;
+    call_clear_for_test(proxy, pz);
+
+    ck_assert(ct_del_args.clear_called == true);
+    ck_assert(ct_del_args.zones_on_host != NULL);
+
+    ct_del_args.op_type = SAVE_IPS_OP;         // restore for other tests
+    pthread_join(tid, NULL);
+}
+END_TEST
+
+START_TEST(test_src_clear_zone_fail)
+{
+    const char address[] = "unix:path=/tmp/dbus/system_bus_socket";
+    const char helper_id[] = "helper_test_save";
+    bool stop_flag = false;
+    GDBusConnection *client;
+    GDBusProxy *proxy;
+
+    client = create_client(address);
+    pthread_t tid = create_dbus_thread(helper_id, SAVE_MODE, &stop_flag);
+    sleep(2);
+
+    ct_del_args.op_type = SAVE_PORT_ZONE_OP;
+    ct_del_args.clear_called = false;
+
+    proxy = get_lmct_mgmt_proxy(client);
+    GStrv pz = g_new(char *, 2);               // odd length (1 entry) -> rejected
+    pz[0] = g_strdup("port-uuid-1");
+    pz[1] = NULL;
+
+    fail_clear = false;
+    call_clear_for_test(proxy, pz);
+
+    ck_assert(ct_del_args.clear_called == false); // pairing guard fired
+
+    ct_del_args.op_type = SAVE_IPS_OP;
+    pthread_join(tid, NULL);
+}
+END_TEST
+
+START_TEST(test_dst_load_zone_pass)
+{
+    const char address[] = "unix:path=/tmp/dbus/system_bus_socket";
+    const char helper_id[] = "helper_test_save";
+    uint32_t data[3] = { 1, 2, 3 };
+
+    GDBusConnection *client;
+    GDBusProxy *proxy;
+    bool stop_flag = false;
+
+    // zone-mode LOAD config: old_zone 5 -> new_zone 10
+    struct load_mode_config zone_cfg;
+    zone_cfg.op_type = LOAD_PORT_ZONE_OP;
+    zone_cfg.src_dst_zone_map = g_hash_table_new(g_direct_hash, g_direct_equal);
+    g_hash_table_insert(zone_cfg.src_dst_zone_map,
+                        GUINT_TO_POINTER(5u), GUINT_TO_POINTER(10u));
+
+    client = create_client(address);
+    fail_netlink = false;
+    next_load_config = &zone_cfg;
+    pthread_t tid = create_dbus_thread(helper_id, LOAD_MODE, &stop_flag);
+    next_load_config = NULL;
+    sleep(2);
+
+    fail_load = false;
+    batch_size = 0;
+    load_size = sizeof(uint32_t) * 3;   // one entry processed
+    load_zone_enabled = true;
+    load_zone = 5;
+    last_appended_zone = -1;
+
+    proxy = get_dbus_vmstate_proxy(client);
+    call_load_for_test(proxy, data, load_size);
+    pthread_join(tid, NULL);
+
+    ck_assert_int_eq(last_appended_zone, 10); // 5 was rewritten to 10
+
+    load_zone_enabled = false;
+    g_hash_table_destroy(zone_cfg.src_dst_zone_map);
+}
+END_TEST
+
+START_TEST(test_dst_load_zone_drop)
+{
+    const char address[] = "unix:path=/tmp/dbus/system_bus_socket";
+    const char helper_id[] = "helper_test_save";
+    uint32_t data[3] = { 1, 2, 3 };
+
+    GDBusConnection *client;
+    GDBusProxy *proxy;
+    bool stop_flag = false;
+
+    // zone-mode LOAD config with an EMPTY map: entry's zone won't be found
+    struct load_mode_config zone_cfg;
+    zone_cfg.op_type = LOAD_PORT_ZONE_OP;
+    zone_cfg.src_dst_zone_map = g_hash_table_new(g_direct_hash, g_direct_equal);
+
+    client = create_client(address);
+    fail_netlink = false;
+    next_load_config = &zone_cfg;
+    pthread_t tid = create_dbus_thread(helper_id, LOAD_MODE, &stop_flag);
+    next_load_config = NULL;
+    sleep(2);
+
+    fail_load = false;
+    batch_size = 0;
+    load_size = sizeof(uint32_t) * 3;
+    load_zone_enabled = true;
+    load_zone = 5;            // not present in the map -> drop
+    last_appended_zone = -1;
+
+    proxy = get_dbus_vmstate_proxy(client);
+    call_load_for_test(proxy, data, load_size);
+    pthread_join(tid, NULL);
+
+    ck_assert_int_eq(last_appended_zone, -1); // entry dropped, never appended
+
+    load_zone_enabled = false;
+    g_hash_table_destroy(zone_cfg.src_dst_zone_map);
+}
+END_TEST
+
 Suite *
 dbus_server_suite(void)
 {
@@ -563,9 +804,14 @@ dbus_server_suite(void)
     tcase_add_test(tc_core, test_src_save_fail_clear_fail);
     tcase_add_test(tc_core, test_src_save_fail_clear_pass);
     tcase_add_test(tc_core, test_src_save_pass_clear_pass);
+    tcase_add_test(tc_core, test_src_save_zone_pass);
+    tcase_add_test(tc_core, test_src_clear_zone_pass);
+    tcase_add_test(tc_core, test_src_clear_zone_fail);
     tcase_add_test(tc_core, test_dst_load_payload_zero);
     tcase_add_test(tc_core, test_dst_load_netlink_fail);
     tcase_add_test(tc_core, test_dst_load_pass);
+    tcase_add_test(tc_core, test_dst_load_zone_pass);
+    tcase_add_test(tc_core, test_dst_load_zone_drop);
 
     suite_add_tcase(s, tc_core);
 

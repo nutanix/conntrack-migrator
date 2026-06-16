@@ -12,6 +12,7 @@
  */
 
 #include <errno.h>
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -51,6 +52,74 @@ complete_on_load(VMState1 *object, GDBusMethodInvocation *invocation)
 }
 
 /**
+ * LOAD-time zone rewrite hook.
+ *
+ * For each unmarshalled CT entry, looks up its CT zone in the
+ * (old_zone -> new_zone) map and overwrites ATTR_ZONE in place. Entries
+ * whose old_zone is not in the map are dropped: the source migrated a
+ * zone that the destination wasn't told about, which is a control-plane
+ * mismatch we'd rather log than silently land in the wrong zone.
+ *
+ * Note: only ATTR_ZONE is on the wire (see ct_entry_attr_to_nf_attr in
+ * conntrack_entry.c); the kernel populates orig/repl-zone from this
+ * single value when it inserts the entry.
+ *
+ * Args:
+ *   @ct          pointer to the freshly-unmarshalled nf_conntrack object.
+ *   @load_config LOAD-mode config. NULL is treated as legacy pass-through.
+ *
+ * Returns:
+ *   true  -> proceed with this entry (rewrite applied or pass-through).
+ *   false -> drop this entry; caller must not append it to the batch.
+ */
+static bool
+apply_zone_rewrite(struct nf_conntrack *ct,
+                   const struct load_mode_config *load_config)
+{
+    uint16_t old_zone, new_zone;
+    gpointer val;
+
+    if (ct == NULL) {
+        LOG(ERROR, "%s: ct is NULL", __func__);
+        return false;
+    }
+
+    if (load_config == NULL || load_config->op_type == LOAD_IPS_OP) {
+        return true;
+    }
+
+    /* Zone-mode LOAD: every entry must carry a CT zone. SAVE-side
+     * validate_ct_entry (Step 2) enforces this, but defend anyway so we
+     * never silently land an unzoned entry in the kernel's default zone. */
+    if (nfct_attr_is_set(ct, ATTR_ZONE) <= 0) {
+        LOG(WARNING, "%s: zone-mode LOAD received entry with no ATTR_ZONE; "
+            "dropping.", __func__);
+        return false;
+    }
+
+    old_zone = nfct_get_attr_u16(ct, ATTR_ZONE);
+
+    /* _extended distinguishes "key not in map" from "key maps to value
+     * whose GUINT_TO_POINTER is NULL". The latter is a legitimate remap
+     * to zone 0; plain g_hash_table_lookup conflates the two and would
+     * silently drop a valid old_zone -> 0 mapping. */
+    if (!g_hash_table_lookup_extended(load_config->src_dst_zone_map,
+                                      GUINT_TO_POINTER((guint) old_zone),
+                                      NULL, &val)) {
+        LOG(WARNING, "%s: old_zone %u not in src_dst_zone_map; dropping entry.",
+            __func__, (unsigned) old_zone);
+        return false;
+    }
+    new_zone = (uint16_t) GPOINTER_TO_UINT(val);
+
+    nfct_set_attr_u16(ct, ATTR_ZONE, new_zone);
+
+    LOG(VERBOSE, "%s: rewrote zone %u -> %u",
+        __func__, (unsigned) old_zone, (unsigned) new_zone);
+    return true;
+}
+
+/**
  * IPC endpoint for Load message.
  *
  * This function is called at the destination host where it receives the
@@ -86,6 +155,7 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
         const gchar *arg_data, gpointer user_data)
 {
 
+    struct dbus_targs *targs = user_data;
     GVariant *args, *var;
     gsize size;
     void *payload;
@@ -158,10 +228,23 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
         payload += bytes_read;
         total_bytes_read += bytes_read;
 
+        // Apply the LOAD-time zone rewrite (no-op in legacy mode). Entries
+        // whose source zone isn't in src_dst_zone_map are dropped here so
+        // they never reach the batch builder.
+        if (!apply_zone_rewrite(ct, targs->load_config)) {
+            label = NULL;
+            continue;
+        }
+
         curr_batch_offset = mnl_nlmsg_batch_current(batch);
 
-        // Do the programming here
-        append_ct_to_batch(curr_batch_offset, ct, label, seq++);
+        // Do the programming here. If the build failed the partial header
+        // is left in place at curr_batch_offset; skip mnl_nlmsg_batch_next
+        // so the next iteration overwrites it.
+        if (append_ct_to_batch(curr_batch_offset, ct, label, seq++) < 0) {
+            label = NULL;
+            continue;
+        }
         label = NULL;
         // If there is space in batch, add the entry to it
         if (mnl_nlmsg_batch_next(batch)) {
@@ -226,7 +309,7 @@ on_save(VMState1 *object, GDBusMethodInvocation *invocation, gpointer user_data)
     // gracefully exit.
     *(targs->stop_flag) = true;
 
-    data_tmpl = data_template_new();
+    data_tmpl = data_template_new(targs->save_op_type);
 
     buf = marshal(conn_store, data_tmpl, &data_size);
     if (buf == NULL) {
@@ -261,13 +344,28 @@ complete_on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation)
 /**
  * RPC endpoint for Clear message.
  *
- * This function is called at the source host. At the end of
- * successful migration, we want to remove the CT entries of the VM that has
- * been migrated from the host. This function receives the list of ip_address
- * that are currently present on this host. The list of ip_address that have
- * been migrated are already available to us when we started the helper.
- * Thus, on receiving the clear call we signal the conntrack delete thread to
- * clear the migrated conntrack entries.
+ * Called at the source host at the end of a successful migration to
+ * remove the CT entries of the VM that has been migrated.
+ *
+ * Payload shape, in both modes, is "as" (array of strings). The
+ * interpretation depends on the helper's active SAVE sub-mode, which
+ * is fixed at start-up in start_in_save_mode and recorded on
+ * ct_del_args.op_type (an extern global declared in ct_delete_args.h):
+ *
+ *   - IP mode  (SAVE_IPS_OP)        : each string is an IPv4 address
+ *                                     currently present on this host.
+ *   - Zone mode (SAVE_PORT_ZONE_OP) : a flat strv of paired entries
+ *                                     [port_uuid_0, zone_0,
+ *                                      port_uuid_1, zone_1, ...] where
+ *                                        each zone is a decimal CT zone
+ *                                        currently owned by the named
+ *                                        port still on this host. Length
+ *                                        must be even; the helper only
+ *                                        retains the zone half.
+ *
+ * On success the parsed set is published to ct_del_args under the lock,
+ * the clear_called condition is signalled, and the delete thread wakes
+ * up to do the actual NFCT_Q_DESTROY work.
  *
  * NOTE: the reason for performing this operation asynchronously is that
  * migrate task should not be held up just for the cleanup. And also since
@@ -290,31 +388,78 @@ static gboolean
 on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
                  const gchar *arg_data, gpointer user_data)
 {
-    LOG(INFO, "%s: Clear start", __func__);
+    LOG(INFO, "%s: Clear start (op_type=%s)", __func__,
+        convert_save_mode_op_type_to_string(ct_del_args.op_type));
     GVariant *args, *var;
-    gsize num_ip_address = 0;
-    char **ip_addresses;
-    GHashTable *ips_on_host;
+    gsize num_entries = 0;
+    char **payload;
+    GHashTable *ips_on_host   = NULL;
+    GHashTable *zones_on_host = NULL;
+    bool parse_ok;
 
     args = g_dbus_method_invocation_get_parameters(invocation);
     var = g_variant_get_child_value(args, 0);
-    ip_addresses = g_variant_dup_strv(var, &num_ip_address);
+    payload = g_variant_dup_strv(var, &num_entries);
 
-    ips_on_host = create_hashtable_from_ip_list((const char **)ip_addresses,
-                                                num_ip_address);
-    g_strfreev(ip_addresses);
-    if (ips_on_host == NULL) {
-        LOG(ERROR, "%s: Failed to create ips_on_host", __func__);
+    /* Both downstream parsers take an int. g_variant_dup_strv reports a
+     * gsize, so guard against a (theoretical) D-Bus payload that would
+     * silently narrow to a negative or truncated int on the call below.
+     * In practice num_entries is tiny, but failing fast at the IPC
+     * boundary is cheaper than reasoning about it later. */
+    if (num_entries > INT_MAX) {
+        LOG(ERROR, "%s: clear payload too large for int (%zu entries)",
+            __func__, num_entries);
+        g_strfreev(payload);
+        return complete_on_clear(object, invocation);
+    }
+
+    /* Zone-mode clear payload is paired (port_uuid, zone). Catch a
+     * malformed odd-length strv up front so the parser doesn't have to
+     * own this protocol-level invariant on its own. */
+    if (ct_del_args.op_type == SAVE_PORT_ZONE_OP &&
+        (num_entries % 2) != 0) {
+        LOG(ERROR, "%s: zone-mode clear payload must be paired "
+            "(port_uuid, zone); got odd length %zu",
+            __func__, num_entries);
+        g_strfreev(payload);
+        return complete_on_clear(object, invocation);
+    }
+
+    if (ct_del_args.op_type == SAVE_IPS_OP) {
+        ips_on_host = create_hashtable_from_ip_list(
+                          (const char **)payload, (int) num_entries);
+        parse_ok = (ips_on_host != NULL);
+    } else {   /* SAVE_PORT_ZONE_OP */
+        zones_on_host = create_hashtable_from_port_zone_pairs(
+                            (const char **)payload, (int) num_entries);
+        parse_ok = (zones_on_host != NULL);
+    }
+    g_strfreev(payload);
+
+    if (!parse_ok) {
+        LOG(ERROR, "%s: Failed to parse %s payload", __func__,
+            ct_del_args.op_type == SAVE_IPS_OP ? "ips_on_host"
+                                               : "zones_on_host");
         return complete_on_clear(object, invocation);
     }
 
     pthread_mutex_lock(&ct_del_args.mutex);
-    ct_del_args.ips_on_host = ips_on_host;
+    if (ct_del_args.op_type == SAVE_IPS_OP) {
+        ct_del_args.ips_on_host = ips_on_host;
+    } else {
+        ct_del_args.zones_on_host = zones_on_host;
+    }
     ct_del_args.clear_called = true;
     pthread_cond_signal(&ct_del_args.clear_called_cond);
     pthread_mutex_unlock(&ct_del_args.mutex);
 
-    LOG(INFO, "%s: Clear completed", __func__);
+    if (ct_del_args.op_type == SAVE_IPS_OP) {
+        LOG(INFO, "%s: Clear completed (received %zu IPs)",
+            __func__, num_entries);
+    } else {
+        LOG(INFO, "%s: Clear completed (received %zu port/zone pairs)",
+            __func__, num_entries / 2);
+    }
     return complete_on_clear(object, invocation);
 }
 
@@ -463,6 +608,26 @@ err:
 }
 
 /**
+ * Asks the dbus thread to exit its main loop gracefully.
+ *
+ * See declaration in dbus_server.h for the full contract.
+ */
+void
+dbus_server_request_quit(struct dbus_targs *targs)
+{
+    if (targs == NULL) {
+        return;
+    }
+
+    pthread_mutex_lock(&targs->loop_mu);
+    targs->should_quit = true;
+    if (targs->loop != NULL) {
+        g_main_loop_quit(targs->loop);
+    }
+    pthread_mutex_unlock(&targs->loop_mu);
+}
+
+/**
  * Starts the dbus server.
  *
  * This function performs the following tasks:
@@ -480,6 +645,8 @@ void *
 dbus_server_init(void *data)
 {
     guint dbus_id;
+    GMainLoop *local_loop;
+    bool quit_early;
 
     struct dbus_targs *targs = data;
 
@@ -496,7 +663,30 @@ dbus_server_init(void *data)
                 "programming", __func__);
         }
     }
-    loop = g_main_loop_new(NULL, FALSE);
+
+    /* Publish the loop atomically with the should_quit check so any quit
+     * request that arrived while we were still booting is honoured before
+     * we ever enter g_main_loop_run. Mirroring to the file-static `loop`
+     * keeps complete_on_load / complete_on_clear working unchanged. */
+    local_loop = g_main_loop_new(NULL, FALSE);
+    pthread_mutex_lock(&targs->loop_mu);
+    targs->loop = local_loop;
+    loop = local_loop;
+    quit_early = targs->should_quit;
+    pthread_mutex_unlock(&targs->loop_mu);
+
+    if (quit_early) {
+        LOG(INFO, "%s: shutdown requested before loop start; exiting.",
+            __func__);
+        pthread_mutex_lock(&targs->loop_mu);
+        targs->loop = NULL;
+        loop = NULL;
+        pthread_mutex_unlock(&targs->loop_mu);
+        g_main_loop_unref(local_loop);
+        *(targs->stop_flag) = true;
+        return NULL;
+    }
+
     dbus_id = g_bus_own_name(G_BUS_TYPE_SYSTEM,
                              dbus_name,
                              G_BUS_NAME_OWNER_FLAGS_NONE,
@@ -506,9 +696,14 @@ dbus_server_init(void *data)
                              data,
                              NULL);
 
-    g_main_loop_run(loop);
+    g_main_loop_run(local_loop);
     g_bus_unown_name(dbus_id);
-    g_main_loop_unref(loop);
+
+    pthread_mutex_lock(&targs->loop_mu);
+    targs->loop = NULL;
+    loop = NULL;
+    pthread_mutex_unlock(&targs->loop_mu);
+    g_main_loop_unref(local_loop);
 
     // Set the boolean flag to true, so that netlink threads can
     // gracefully exit

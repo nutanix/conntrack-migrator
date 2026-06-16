@@ -43,7 +43,11 @@ int ct_entry_attr_to_size[CT_ATTR_MAX] =
     [CT_ATTR_TIMEOUT] = UINT32_T_SIZE,
     [CT_ATTR_MARK] = UINT32_T_SIZE,
     [CT_ATTR_STATUS] = UINT32_T_SIZE,
-    [CT_ATTR_LABEL] = UINT32_T_SIZE * CT_LABEL_NUM_WORDS
+    [CT_ATTR_LABEL] = UINT32_T_SIZE * CT_LABEL_NUM_WORDS,
+    [CT_ATTR_L3_SRC_V4_REPL] = UINT32_T_SIZE,
+    [CT_ATTR_L3_DST_V4_REPL] = UINT32_T_SIZE,
+    [CT_ATTR_L4_SRC_PORT_REPL] = UINT16_T_SIZE,
+    [CT_ATTR_L4_DST_PORT_REPL] = UINT16_T_SIZE
 };
 
 struct data_template *
@@ -174,6 +178,97 @@ START_TEST(test_marshal)
     ck_assert(exp_d3 == d3);
 
     // check we've reached end of buffer
+    ck_assert(buffer == buffer_end);
+}
+END_TEST
+
+START_TEST(test_marshal_for_zone)
+{
+    init_lmct_config();
+    struct data_template *tmpl;
+    tmpl = create_template();
+    struct conntrack_store *store;
+    store = create_conntrack_store();
+
+    // A realistic zone-mode entry: original 5-tuple + CT zone + the NAT'd
+    // reply 5-tuple. marshal is schema-agnostic (it copies the bitmap and
+    // data blob verbatim).
+    uint8_t entry_data[26]; // 4+4 (orig ips) + 2 (zone) + 2+2 (orig ports)
+                            // + 4+4 (repl ips) + 2+2 (repl ports).
+    uint8_t *p;
+    uint32_t src_ip = 2;
+    uint32_t dst_ip = 3;
+    uint16_t zone = 10;
+    uint16_t src_port = 1024;
+    uint16_t dst_port = 9090;
+    uint32_t repl_src_ip = 4;
+    uint32_t repl_dst_ip = 5;
+    uint16_t repl_src_port = 5555;
+    uint16_t repl_dst_port = 6666;
+
+    p = entry_data;
+    memcpy(p, &src_ip, sizeof(src_ip));             p += sizeof(src_ip);
+    memcpy(p, &dst_ip, sizeof(dst_ip));             p += sizeof(dst_ip);
+    memcpy(p, &zone, sizeof(zone));                 p += sizeof(zone);
+    memcpy(p, &src_port, sizeof(src_port));         p += sizeof(src_port);
+    memcpy(p, &dst_port, sizeof(dst_port));         p += sizeof(dst_port);
+    memcpy(p, &repl_src_ip, sizeof(repl_src_ip));   p += sizeof(repl_src_ip);
+    memcpy(p, &repl_dst_ip, sizeof(repl_dst_ip));   p += sizeof(repl_dst_ip);
+    memcpy(p, &repl_src_port, sizeof(repl_src_port)); p += sizeof(repl_src_port);
+    memcpy(p, &repl_dst_port, sizeof(repl_dst_port)); p += sizeof(repl_dst_port);
+
+    struct conntrack_entry *e1;
+    e1 = create_conntrack_entry(entry_data, sizeof(entry_data));
+    e1->bitmap[0] = (1 << CT_ATTR_L3_SRC_V4)        |
+                    (1 << CT_ATTR_L3_DST_V4)        |
+                    (1 << CT_ATTR_ZONE)             |
+                    (1 << CT_ATTR_L4_SRC_PORT)      |
+                    (1 << CT_ATTR_L4_DST_PORT)      |
+                    (1 << CT_ATTR_L3_SRC_V4_REPL)   |
+                    (1 << CT_ATTR_L3_DST_V4_REPL)   |
+                    (1 << CT_ATTR_L4_SRC_PORT_REPL) |
+                    (1 << CT_ATTR_L4_DST_PORT_REPL);
+    g_hash_table_insert(store->store, GINT_TO_POINTER(1), e1);
+
+    uint32_t data_size;
+    uint32_t exp_data_size;
+    void *buffer = marshal(store, tmpl, &data_size);
+    void *buffer_end = buffer + data_size;
+    exp_data_size = sizeof(data_size) +                       // data size
+                    (UINT8_T_SIZE + tmpl->payload_size) +     // template
+                    ((BITMAP_NUM_WORDS * WORD_SIZE) +
+                     sizeof(entry_data));                     // one entry
+    ck_assert(exp_data_size == data_size);
+    // check the values written in the buffer
+    // Check 1: total size is correct.
+    uint32_t read_data_size;
+    memcpy(&read_data_size, buffer, sizeof(read_data_size));
+    buffer += sizeof(read_data_size);
+    ck_assert(read_data_size == exp_data_size);
+
+    // Check 2: template is correctly marshalled (covers zone + reply slots).
+    uint8_t tmpl_bits;
+    memcpy(&tmpl_bits, buffer, sizeof(tmpl_bits));
+    buffer += sizeof(tmpl_bits);
+    ck_assert(tmpl_bits == tmpl->num_bits);
+
+    uint8_t *payload = g_malloc(tmpl->payload_size);
+    memcpy(payload, buffer, tmpl->payload_size);
+    buffer += tmpl->payload_size;
+    int i;
+    for (i = CT_ATTR_MIN; i < CT_ATTR_MAX; i++) {
+        ck_assert(tmpl->payload[i] == payload[i]);
+    }
+
+    // Check 3: the non-zero bitmap is marshalled verbatim.
+    ck_assert(memcmp(buffer, e1->bitmap, BITMAP_NUM_WORDS * WORD_SIZE) == 0);
+    buffer += (BITMAP_NUM_WORDS * WORD_SIZE);
+
+    // Check 4: the entry data blob is marshalled verbatim.
+    ck_assert(memcmp(buffer, entry_data, sizeof(entry_data)) == 0);
+    buffer += sizeof(entry_data);
+
+    // Check we've reached end of buffer
     ck_assert(buffer == buffer_end);
 }
 END_TEST
@@ -330,6 +425,7 @@ marshal_suite(void)
     tc_core = tcase_create("Core");
 
     tcase_add_test(tc_core, test_marshal);
+    tcase_add_test(tc_core, test_marshal_for_zone);
     tcase_add_test(tc_core, test_marshal_empty_conntrack_store);
     tcase_add_test(tc_core, test_marshal_null_conntrack_store);
     tcase_add_test(tc_core, test_marshal_null_template);

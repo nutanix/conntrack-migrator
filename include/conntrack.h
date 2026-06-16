@@ -22,6 +22,7 @@
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 #include <pthread.h>
 
+#include "common.h"
 #include "ct_delete_args.h"
 
 /**
@@ -29,19 +30,20 @@
  * the conntrack events.
  */
 struct ct_events_targs {
-    pthread_t tid;              // thread ID
-    GHashTable *ips_to_migrate; // IPs for which CT events needs to be listened
+    pthread_t tid;                            // thread ID
+    struct save_mode_config *save_config;     // SAVE-mode config (mode-aware)
     bool *stop_flag; // Flag when True, stop listening for CT events
     bool is_src; // Flag indicating whether the args are for src based events
 };
 
 int
-get_conntrack_dump(struct nfct_handle *, GHashTable *);
+get_conntrack_dump(struct nfct_handle *, struct save_mode_config *);
 
 int
-listen_for_conntrack_events(struct mnl_socket *, GHashTable *, bool, bool *);
+listen_for_conntrack_events(struct mnl_socket *, struct save_mode_config *,
+                            bool, bool *);
 
-void
+int
 append_ct_to_batch(char *, struct nf_conntrack *, uint32_t *, int);
 
 int
