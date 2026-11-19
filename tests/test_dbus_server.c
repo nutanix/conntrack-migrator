@@ -325,7 +325,7 @@ call_save_for_test(GDBusProxy *proxy)
 }
 
 void
-call_clear_for_test(GDBusProxy *proxy, GStrv data)
+call_clear_for_test(GDBusProxy *proxy, GStrv data, bool expect_ok)
 {
     g_autoptr(GError) err = NULL;
     g_autoptr(GVariant) result = NULL;
@@ -339,7 +339,13 @@ call_clear_for_test(GDBusProxy *proxy, GStrv data)
                                     G_DBUS_CALL_FLAGS_NO_AUTO_START,
                                     -1, NULL, &err);
 
-    ck_assert_msg(err == NULL, "Failed to load %s", err ? err->message : "");
+    if (expect_ok) {
+        ck_assert_msg(err == NULL, "Failed to clear %s",
+                      err ? err->message : "");
+    } else {
+        ck_assert_msg(err != NULL,
+                      "Expected Clear to fail, but it succeeded");
+    }
 }
 
 pthread_t
@@ -394,13 +400,17 @@ START_TEST(test_src_save_pass_clear_fail)
     ck_assert_msg(strcmp("save", ret->data) == 0,
                   "expected: save, got: %s\n", ret->data);
 
-    // call clear
+    // call clear — parse mock fails; server returns InvalidArgs
+    ct_del_args.clear_called = false;
+    ct_del_args.clear_failed = false;
     proxy = get_lmct_mgmt_proxy(client);
     GStrv ips = g_new(char *, 2);
     ips[0] = g_strdup("1.2.3.4");
     ips[1] = NULL;
     fail_clear = true;
-    call_clear_for_test(proxy, ips);
+    call_clear_for_test(proxy, ips, false);
+    ck_assert(ct_del_args.clear_called == true);
+    ck_assert(ct_del_args.clear_failed == true);
 
     pthread_join(tid, NULL);
 }
@@ -431,13 +441,17 @@ START_TEST(test_src_save_fail_clear_fail)
     ck_assert(ret->data != NULL);
     ck_assert(ret->size != 0);
 
-    // call clear
+    // call clear — parse mock fails; server returns InvalidArgs
+    ct_del_args.clear_called = false;
+    ct_del_args.clear_failed = false;
     proxy = get_lmct_mgmt_proxy(client);
     GStrv ips = g_new(char *, 2);
     ips[0] = g_strdup("1.2.3.4");
     ips[1] = NULL;
     fail_clear = true;
-    call_clear_for_test(proxy, ips);
+    call_clear_for_test(proxy, ips, false);
+    ck_assert(ct_del_args.clear_called == true);
+    ck_assert(ct_del_args.clear_failed == true);
 
     pthread_join(tid, NULL);
 }
@@ -477,7 +491,7 @@ START_TEST(test_src_save_fail_clear_pass)
     ips[1] = NULL;
 
     fail_clear = false;
-    call_clear_for_test(proxy, ips);
+    call_clear_for_test(proxy, ips, true);
     ck_assert(ct_del_args.clear_called == true);
 
     pthread_join(tid, NULL);
@@ -522,7 +536,7 @@ START_TEST(test_src_save_pass_clear_pass)
     ips[1] = NULL;
 
     fail_clear = false;
-    call_clear_for_test(proxy, ips);
+    call_clear_for_test(proxy, ips, true);
     ck_assert(ct_del_args.clear_called == true);
 
     pthread_join(tid, NULL);
@@ -639,7 +653,7 @@ START_TEST(test_src_save_zone_pass)
     ips[0] = g_strdup("1.2.3.4");
     ips[1] = NULL;
     fail_clear = false;
-    call_clear_for_test(proxy, ips);
+    call_clear_for_test(proxy, ips, true);
 
     pthread_join(tid, NULL);
 }
@@ -667,7 +681,7 @@ START_TEST(test_src_clear_zone_pass)
     pz[2] = NULL;
 
     fail_clear = false;
-    call_clear_for_test(proxy, pz);
+    call_clear_for_test(proxy, pz, true);
 
     ck_assert(ct_del_args.clear_called == true);
     ck_assert(ct_del_args.zones_on_host != NULL);
@@ -691,6 +705,7 @@ START_TEST(test_src_clear_zone_fail)
 
     ct_del_args.op_type = SAVE_PORT_ZONE_OP;
     ct_del_args.clear_called = false;
+    ct_del_args.clear_failed = false;
 
     proxy = get_lmct_mgmt_proxy(client);
     GStrv pz = g_new(char *, 2);               // odd length (1 entry) -> rejected
@@ -698,9 +713,11 @@ START_TEST(test_src_clear_zone_fail)
     pz[1] = NULL;
 
     fail_clear = false;
-    call_clear_for_test(proxy, pz);
+    call_clear_for_test(proxy, pz, false);
 
-    ck_assert(ct_del_args.clear_called == false); // pairing guard fired
+    // fail_on_clear wakes the delete thread but skips destroy
+    ck_assert(ct_del_args.clear_called == true);
+    ck_assert(ct_del_args.clear_failed == true);
 
     ct_del_args.op_type = SAVE_IPS_OP;
     pthread_join(tid, NULL);
