@@ -44,7 +44,7 @@ struct data_template {
  * data_template_destroy().
  */
 struct data_template *
-data_template_new(enum save_mode_op_type op_type);
+data_template_new(enum save_mode_op_type);
 
 void
 data_template_destroy(struct data_template *);

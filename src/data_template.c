@@ -39,11 +39,6 @@ data_template_new(enum save_mode_op_type op_type)
     int i;
     uint8_t num_bits;
 
-    /* Wire-compat: IP mode advertises only the v1.0 schema so the
-     * payload is byte-identical to what a v1.0 SAVE binary produces.
-     * Zone mode advertises every slot the current binary understands.
-     * The trailing slots are gated off in IP mode by is_zone_only_slot()
-     * (conntrack_entry.c) so they are never set in any bitmap either. */
     num_bits = (op_type == SAVE_IPS_OP) ? CT_ATTR_LEGACY_NUM_BITS
                                         : CT_ATTR_MAX;
 

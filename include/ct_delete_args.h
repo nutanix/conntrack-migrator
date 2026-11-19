@@ -61,6 +61,8 @@ struct ct_delete_args {
     };
 
     bool clear_called;         // Flag to indicate if clear DBUS IPC is invoked
+    bool clear_failed;         // Clear was invoked but the payload was invalid.
+                               // The delete thread wakes and skips the dump.
     pthread_mutex_t mutex;            // mutex for the condition var
     pthread_cond_t clear_called_cond; // Condition to wait until the clear IPC is called
 };

@@ -74,7 +74,8 @@ complete_on_load(VMState1 *object, GDBusMethodInvocation *invocation)
  */
 static bool
 apply_zone_rewrite(struct nf_conntrack *ct,
-                   const struct load_mode_config *load_config)
+                   const struct load_mode_config *load_config,
+                   uint32_t *unmapped)
 {
     uint16_t old_zone, new_zone;
     gpointer val;
@@ -86,6 +87,12 @@ apply_zone_rewrite(struct nf_conntrack *ct,
 
     if (load_config == NULL || load_config->op_type == LOAD_IPS_OP) {
         return true;
+    }
+
+    if (load_config->op_type != LOAD_PORT_ZONE_OP ||
+        load_config->src_dst_zone_map == NULL) {
+        LOG(ERROR, "%s: zone-mode LOAD has no src_dst_zone_map", __func__);
+        return false;
     }
 
     /* Zone-mode LOAD: every entry must carry a CT zone. SAVE-side
@@ -106,8 +113,9 @@ apply_zone_rewrite(struct nf_conntrack *ct,
     if (!g_hash_table_lookup_extended(load_config->src_dst_zone_map,
                                       GUINT_TO_POINTER((guint) old_zone),
                                       NULL, &val)) {
-        LOG(WARNING, "%s: old_zone %u not in src_dst_zone_map; dropping entry.",
-            __func__, (unsigned) old_zone);
+        if (unmapped != NULL) {
+            (*unmapped)++;
+        }
         return false;
     }
     new_zone = (uint16_t) GPOINTER_TO_UINT(val);
@@ -157,6 +165,7 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
 
     struct dbus_targs *targs = user_data;
     GVariant *args, *var;
+    uint32_t unmapped = 0;
     gsize size;
     void *payload;
     uint32_t payload_size;
@@ -185,17 +194,20 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
     if (nl == NULL) {
         LOG(ERROR, "%s: Cannot create conntrack in kernel CT. socket is NULL",
             __func__);
+        g_variant_unref(var);
         return complete_on_load(object, invocation);
     }
 
     if (payload == NULL) {
         LOG(INFO, "%s: Received NULL payload. Exiting.", __func__);
+        g_variant_unref(var);
         return complete_on_load(object, invocation);
     }
 
     ct = nfct_new();
     if (ct == NULL) {
         LOG(ERROR, "%s: cannot allocate nf_conntrack", __func__);
+        g_variant_unref(var);
         return complete_on_load(object, invocation);
     }
 
@@ -206,6 +218,7 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
 
     if (payload_size == 0) {
         LOG(WARNING, "%s: received payload size as 0", __func__);
+        g_variant_unref(var);
         return complete_on_load(object, invocation);
     }
 
@@ -218,6 +231,7 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
     batch = mnl_nlmsg_batch_start(send_buf, MNL_SOCKET_BUFFER_SIZE);
     if (batch == NULL) {
         LOG(ERROR, "%s: Cannot create a batch.", __func__);
+        g_variant_unref(var);
         return complete_on_load(object, invocation);
     }
 
@@ -231,7 +245,7 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
         // Apply the LOAD-time zone rewrite (no-op in legacy mode). Entries
         // whose source zone isn't in src_dst_zone_map are dropped here so
         // they never reach the batch builder.
-        if (!apply_zone_rewrite(ct, targs->load_config)) {
+        if (!apply_zone_rewrite(ct, targs->load_config, &unmapped)) {
             label = NULL;
             continue;
         }
@@ -264,7 +278,13 @@ on_load(VMState1 *object, GDBusMethodInvocation *invocation,
     }
     mnl_nlmsg_batch_stop(batch);
 
+    if (unmapped > 0) {
+        LOG(WARNING, "%s: dropped %u entries whose zone was not in the map",
+            __func__, unmapped);
+    }
+
     LOG(INFO, "%s: Load end. Bytes read %d", __func__, payload_size);
+    g_variant_unref(var);
     return complete_on_load(object, invocation);
 }
 
@@ -341,6 +361,25 @@ complete_on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation)
     return TRUE;
 }
 
+/* Clear payload was rejected. Wake the delete thread so the process can
+ * exit, but tell it not to destroy entries, and report the error to the
+ * D-Bus client. */
+static gboolean
+fail_on_clear(GDBusMethodInvocation *invocation, const char *message)
+{
+    pthread_mutex_lock(&ct_del_args.mutex);
+    ct_del_args.clear_failed = true;
+    ct_del_args.clear_called = true;
+    pthread_cond_signal(&ct_del_args.clear_called_cond);
+    pthread_mutex_unlock(&ct_del_args.mutex);
+
+    g_dbus_method_invocation_return_error(
+        invocation, G_DBUS_ERROR, G_DBUS_ERROR_INVALID_ARGS,
+        "%s", message);
+    g_main_loop_quit(loop);
+    return TRUE;
+}
+
 /**
  * RPC endpoint for Clear message.
  *
@@ -386,7 +425,7 @@ complete_on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation)
  */
 static gboolean
 on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
-                 const gchar *arg_data, gpointer user_data)
+        const gchar *arg_data, gpointer user_data)
 {
     LOG(INFO, "%s: Clear start (op_type=%s)", __func__,
         convert_save_mode_op_type_to_string(ct_del_args.op_type));
@@ -400,6 +439,7 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
     args = g_dbus_method_invocation_get_parameters(invocation);
     var = g_variant_get_child_value(args, 0);
     payload = g_variant_dup_strv(var, &num_entries);
+    g_variant_unref(var);
 
     /* Both downstream parsers take an int. g_variant_dup_strv reports a
      * gsize, so guard against a (theoretical) D-Bus payload that would
@@ -410,7 +450,7 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
         LOG(ERROR, "%s: clear payload too large for int (%zu entries)",
             __func__, num_entries);
         g_strfreev(payload);
-        return complete_on_clear(object, invocation);
+        return fail_on_clear(invocation, "clear payload too large");
     }
 
     /* Zone-mode clear payload is paired (port_uuid, zone). Catch a
@@ -422,7 +462,8 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
             "(port_uuid, zone); got odd length %zu",
             __func__, num_entries);
         g_strfreev(payload);
-        return complete_on_clear(object, invocation);
+        return fail_on_clear(invocation,
+                             "zone-mode clear payload must be paired");
     }
 
     if (ct_del_args.op_type == SAVE_IPS_OP) {
@@ -440,7 +481,7 @@ on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation,
         LOG(ERROR, "%s: Failed to parse %s payload", __func__,
             ct_del_args.op_type == SAVE_IPS_OP ? "ips_on_host"
                                                : "zones_on_host");
-        return complete_on_clear(object, invocation);
+        return fail_on_clear(invocation, "failed to parse clear payload");
     }
 
     pthread_mutex_lock(&ct_del_args.mutex);

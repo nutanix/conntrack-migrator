@@ -12,6 +12,7 @@
  */
 
 #include <arpa/inet.h> // For struct in_addr.
+#include <ctype.h>
 #include <err.h>
 #include <errno.h>
 #include <limits.h>
@@ -163,6 +164,11 @@ parse_ct_zone(const char *s, uint16_t *out)
     unsigned long v;
 
     if (s == NULL || *s == '\0' || out == NULL) {
+        return false;
+    }
+
+    /* strtoul skips leading whitespace and accepts a leading '+'. */
+    if (!isdigit((unsigned char)s[0])) {
         return false;
     }
 

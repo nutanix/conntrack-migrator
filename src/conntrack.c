@@ -42,17 +42,17 @@ typedef int (*dump_cb)(enum nf_conntrack_msg_type type,
                        void *data);
 
 /**
- * Structure to represent the callback arguments for the dump taken before
- * deleting the conntrack entries.
+ * Arguments for the callback that scans the kernel conntrack dump
+ * during Clear.
  *
- * Real C tagged union over the active SAVE sub-mode (same shape as
- * ct_delete_args):
- *   op_type == SAVE_IPS_OP        -> ips_migrated / ips_on_host valid.
- *   op_type == SAVE_PORT_ZONE_OP  -> zones_migrated / zones_on_host valid.
- * (the two pairs overlay the same memory; only the active arm is set.)
+ * op_type says how this migration identified flows.
+ *   SAVE_IPS_OP:       compare the entry's IPs with ips_migrated
+ *                      and ips_on_host.
+ *   SAVE_PORT_ZONE_OP: compare the entry's zone with zones_migrated
+ *                      and zones_on_host.
  *
- * ct_store is the per-pass output: CT entries that survive the filter are
- * stolen into it and later iterated for NFCT_Q_DESTROY.
+ * An entry is kept for deletion when it was migrated and its IP or
+ * zone is no longer on this host. Those entries are stored in ct_store.
  */
 struct delete_ct_dump_cb_args {
     enum save_mode_op_type op_type; // selects which arm of the union below is valid
@@ -102,10 +102,8 @@ is_src_or_dst_in_hashtable(struct in_addr *src, struct in_addr *dst,
 /**
  * Returns the CT zone we filter on for migration via an out-parameter.
  *
- * Prefers ATTR_ZONE, falls back to ATTR_ORIG_ZONE. Returns false (without
- * touching @out) if neither attribute is set, so callers in hot paths can
- * distinguish "no zone attribute" from a valid zone value of 0 without
- * relying on validate_ct_entry having run first.
+ * Reads ATTR_ZONE. Returns false, without writing @out, when ATTR_ZONE
+ * is unset. Zone 0 is a valid value.
  *
  * Args:
  *   @ct  pointer to the conntrack entry. Must be non-NULL.
@@ -161,8 +159,7 @@ is_zone_in_hashtable(uint16_t zone, GHashTable *ht)
  *  - Zone information is not present (legacy paranoid check kept verbatim).
  *
  * Zone mode (SAVE_PORT_ZONE_OP):
- *  - At least one of ATTR_ZONE / ATTR_ORIG_ZONE is set so the dispatcher
- *    has a key to filter on.
+ *  - ATTR_ZONE is set, so the dispatcher has a key to filter on.
  *
  * Args:
  *   @type nf message type.
@@ -819,7 +816,7 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
         if (src_addr == NULL || dst_addr == NULL) {
             LOG(WARNING, "%s: ct entry with NULL src/dst IP received. "
                 "Skipping.", __func__);
-            return NFCT_CB_FAILURE;
+            return NFCT_CB_CONTINUE;
         }
 
         in_migrated = is_src_or_dst_in_hashtable(src_addr, dst_addr,
@@ -845,14 +842,14 @@ delete_conntrack_dump_callback(enum nf_conntrack_msg_type type,
         if (nfct_attr_is_set(ct, ATTR_ID) <= 0) {
             LOG(WARNING, "%s: ct entry has no ATTR_ID set; skipping.",
                 __func__);
-            return NFCT_CB_FAILURE;
+            return NFCT_CB_CONTINUE;
         }
         ct_id = nfct_get_attr_u32(ct, ATTR_ID);
 
         if (ct_id == 0) {
             LOG(WARNING, "%s: ct entry with 0 id received. Skipping.",
                 __func__);
-            return NFCT_CB_FAILURE;
+            return NFCT_CB_CONTINUE;
         }
         g_hash_table_insert(cb_args->ct_store, GUINT_TO_POINTER(ct_id), ct);
         return NFCT_CB_STOLEN;
@@ -975,7 +972,7 @@ _delete_ct_entries(struct nfct_handle *handle, struct ct_delete_args *args)
 
 finish:
     if (ct_store != NULL) {
-      g_hash_table_destroy(ct_store);
+        g_hash_table_destroy(ct_store);
     }
 }
 
@@ -1021,6 +1018,12 @@ delete_ct_entries(void *data)
         pthread_cond_wait(&ct_del_args->clear_called_cond, &ct_del_args->mutex);
     }
     LOG(INFO, "%s: thread woke up", __func__);
+
+    if (ct_del_args->clear_failed) {
+        LOG(WARNING, "%s: Clear payload was invalid; skipping delete.",
+            __func__);
+        goto unlock;
+    }
 
     h = nfct_open(CONNTRACK, 0);
     if (h == NULL) {

@@ -38,9 +38,9 @@
  *   - num_ips:     zero is legitimate — it means "VM has no IPv4
  *                  NICs" (start_in_save_mode early-exits in that case).
  */
- #define MIN_ACCEPTABLE_VALUE_FOR_MODE         1
- #define MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES  1
- #define MIN_ACCEPTABLE_VALUE_FOR_NUM_IPS      0
+#define MIN_ACCEPTABLE_VALUE_FOR_MODE         1
+#define MIN_ACCEPTABLE_VALUE_FOR_NUM_ENTRIES  1
+#define MIN_ACCEPTABLE_VALUE_FOR_NUM_IPS      0
 
 /**
  * Sub-mode tag: tells the rest of the daemon which SAVE-mode CLI layout
@@ -64,14 +64,16 @@ enum load_mode_op_type {
 };
 
 /**
- * SAVE-mode runtime config bundle. Real C tagged union over @op_type:
- *   op_type == SAVE_IPS_OP        -> ips_to_migrate is the active arm.
- *   op_type == SAVE_PORT_ZONE_OP  -> zones_to_migrate is the active arm.
- * The active hashtable is owned by save_mode_config and freed by
- * destroy_save_mode_config (which dispatches on @op_type because the two
- * pointer fields now overlay the same memory). Anonymous union so call
- * sites can keep using save_config->ips_to_migrate /
- * save_config->zones_to_migrate directly.
+ * Runtime configuration for capturing source flows.
+ *
+ * A migration tracks flows by IP addresses or by zones, never both,
+ * so the two hashtables share a union.
+ *
+ * @op_type selects the active table:
+ *   SAVE_IPS_OP:       ips_to_migrate
+ *   SAVE_PORT_ZONE_OP: zones_to_migrate
+ *
+ * destroy_save_mode_config() uses @op_type to free the active table.
  */
 struct save_mode_config {
     enum save_mode_op_type op_type;
@@ -97,102 +99,130 @@ struct load_mode_config {
 };
 
 /**
- * Returns a human-readable, log-friendly name for a SAVE sub-mode.
+ * Log name for a SAVE sub-mode.
  *
- * Used so log lines that fan out through both IP-mode and zone-mode
- * paths can self-identify their mode without the operator having to
- * grep backwards for the bootstrap banner.
+ * @op_type SAVE sub-mode tag.
  */
 const char *
-convert_save_mode_op_type_to_string(enum save_mode_op_type op_type);
- 
+convert_save_mode_op_type_to_string(enum save_mode_op_type);
+
+/**
+ * Builds a hashtable of IPv4 addresses from decimal strings.
+ *
+ * IPv6 strings are skipped. Returns NULL if any string is not an IP address.
+ * The caller owns the table.
+ *
+ * @ip_list  address strings.
+ * @num_ips  number of elements in @ip_list.
+ */
 GHashTable *
 create_hashtable_from_ip_list(const char *const [], int);
 
+/**
+ * Checks a port-prefixed UUID of the form port_<8-4-4-4-12>.
+ *
+ * @s candidate string. NULL returns false.
+ */
 bool
 is_valid_uuid_string(const char *);
 
+/**
+ * Parses a decimal CT zone in the range 0..65535.
+ *
+ * Rejects whitespace, a leading sign, and trailing junk.
+ * @out is written only on success.
+ *
+ * @s    decimal string.
+ * @out  parsed zone.
+ */
 bool
 parse_ct_zone(const char *, uint16_t *);
 
-
 /**
- * Ensures that a CLI argument string is an integer >= @min_value and
- * writes the parsed value to *out_value on success.
+ * Parses a CLI argument as an integer >= @min_value.
  *
- * Stricter than atoi(): the full string must be a valid decimal
- * number with no leading/trailing junk. Any of the following triggers
- * errx(EXIT_FAILURE) with a message that names the offending argument:
- *   - @arg_value is NULL or empty
- *   - @arg_value contains non-numeric characters (e.g. "1xyz")
- *   - @arg_value is less than @min_value or greater than INT_MAX
+ * Rejects an empty string and trailing junk such as "1xyz".
+ * On failure it calls errx() and does not return. Use it only from
+ * check_args(), before the daemon forks. Do not call it from the D-Bus loop.
  *
- * The @min_value parameter lets the same helper enforce both
- * "positive" (min_value = 1, for <N>-of-entries and <mode>) and
- * "non-negative" (min_value = 0, for the legacy IP form's num_ips
- * slot where 0 means "VM has no IPv4 NICs"; see the graceful
- * early-exit in start_in_save_mode). min_value = 1 also subsumes the
- * "n <= 0 silent fallback" branches that used to live in
- * detect_save_mode_op_type.
- *
- * Designed for CLI argv slots where every existing caller treated
- * bad input as a fatal error anyway. Folding the errx() into the
- * helper avoids many copies of the same exit message and prevents
- * the atoi() footgun of treating "1xyz" or "" as a successful parse.
- *
- * Note: this helper only enforces a lower bound. Value-set checks
- * (e.g. mode must be 1 or 2) belong in a dedicated validator
- * (check_mode) called immediately after this one.
- *
- * Args:
- *   @arg_value the raw string from argv.
- *   @out_value on success, set to the parsed int. Untouched on
- *              failure (function does not return on failure).
- *   @arg_name  display name for the argument, used in the error
- *              message. Must be non-NULL.
- *   @min_value lowest accepted value (inclusive). Typical values: 1
- *              for "positive int", 0 for "non-negative int".
+ * @arg_value  raw argv string.
+ * @out_value  parsed int. Untouched on failure.
+ * @arg_name   name used in the error message.
+ * @min_value  lowest accepted value, inclusive.
  */
 void
-ensure_cli_arg_is_int_at_least(const char *arg_value, int *out_value,
-                               const char *arg_name, int min_value);
-
-GHashTable *
-create_hashtable_from_zone_list(const char *const zones[], int n_entries);
+ensure_cli_arg_is_int_at_least(const char *, int *, const char *, int);
 
 /**
- * Builds a uint16-keyed hashtable from a strv of paired
- * [port_uuid_0, zone_0, port_uuid_1, zone_1, ...] elements.
+ * Builds a hashtable of CT zones from decimal strings.
  *
- * Used by the zone-mode Clear D-Bus endpoint to translate the
- * "(port, zone) pairs still on this host" payload into a hashtable
- * for the delete dump callback to look up against. The port_uuid half
- * of each pair is treated as opaque metadata and intentionally
- * ignored: the zone-mode delete path only filters on CT zone, so
- * persisting the UUID buys us nothing past the parse step.
+ * Returns NULL if any string is not a uint16 zone. The caller owns the table.
  *
- * @num_entries must be even; an odd count is a wire-protocol violation
- * and the function will return NULL after logging.
+ * @zones      decimal zone strings.
+ * @n_entries  number of elements in @zones.
  */
 GHashTable *
-create_hashtable_from_port_zone_pairs(const char *port_zone_strv[],
-                                      int num_entries);
+create_hashtable_from_zone_list(const char *const [], int);
 
+/**
+ * Parses the flat D-Bus Clear payload into a zone hashtable.
+ *
+ * The payload is a flat list of pairs:
+ *   [port_uuid_1, zone_1, port_uuid_2, zone_2, ...]
+ *
+ * OVN has a 1:1 port-to-zone mapping, so only the zone is kept.
+ * The port UUID is checked and then discarded.
+ *
+ * @port_zone_strv  alternating port UUID and decimal zone.
+ * @num_entries     length of @port_zone_strv. Must be even.
+ *                  An odd length returns NULL.
+ */
+GHashTable *
+create_hashtable_from_port_zone_pairs(const char *[], int);
+
+/**
+ * Wraps an IP hashtable in a SAVE-mode config. Takes ownership of the table.
+ *
+ * @ips_to_migrate non-NULL IP hashtable.
+ */
 struct save_mode_config *
-create_save_mode_config_for_ip_mode(GHashTable *ips_to_migrate);
+create_save_mode_config_for_ip_mode(GHashTable *);
 
+/**
+ * Wraps a zone hashtable in a SAVE-mode config. Takes ownership of the table.
+ *
+ * @zones non-NULL zone hashtable.
+ */
 struct save_mode_config *
-create_save_mode_config_for_port_zone_mode(GHashTable *zones);
+create_save_mode_config_for_port_zone_mode(GHashTable *);
 
+/**
+ * Frees a SAVE-mode config and the hashtable it owns.
+ *
+ * @save_config bundle to free. NULL is ignored.
+ */
 void
 destroy_save_mode_config(struct save_mode_config *);
 
+/**
+ * Allocates a LOAD config for legacy IP mode. No zone rewrite.
+ */
 struct load_mode_config *
 create_load_mode_config_for_legacy_mode(void);
 
+/**
+ * Wraps an old-zone to new-zone map in a LOAD config. Takes ownership.
+ *
+ * @src_dst_zone_map non-NULL map built by check_zone_load_args().
+ */
 struct load_mode_config *
-create_load_mode_config_for_port_zone_mode(GHashTable *src_dst_zone_map);
+create_load_mode_config_for_port_zone_mode(GHashTable *);
 
+/**
+ * Frees a LOAD config and its zone map.
+ *
+ * @load_config bundle to free. NULL is ignored.
+ */
 void
 destroy_load_mode_config(struct load_mode_config *);
 

@@ -34,6 +34,13 @@ struct ct_events_targs {
     struct save_mode_config *save_config;     // SAVE-mode config (mode-aware)
     bool *stop_flag; // Flag when True, stop listening for CT events
     bool is_src; // Flag indicating whether the args are for src based events
+
+    /* Set by the events thread after mnl_socket_bind returns.
+     * start_in_save_mode waits on ready before the initial dump. */
+    pthread_mutex_t ready_mu;
+    pthread_cond_t ready_cv;
+    bool ready;
+    bool bound_ok;
 };
 
 int

@@ -35,6 +35,7 @@ struct ct_delete_args ct_del_args = {
     .ips_migrated = NULL,
     .ips_on_host = NULL,
     .clear_called = false,
+    .clear_failed = false,
     .mutex = PTHREAD_MUTEX_INITIALIZER,
     .clear_called_cond = PTHREAD_COND_INITIALIZER
 };

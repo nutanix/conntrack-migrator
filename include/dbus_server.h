@@ -74,6 +74,6 @@ dbus_server_init(void *);
  * No-op on NULL @targs.
  */
 void
-dbus_server_request_quit(struct dbus_targs *targs);
+dbus_server_request_quit(struct dbus_targs *);
 
 #endif /* DBUS_SERVER_H */
