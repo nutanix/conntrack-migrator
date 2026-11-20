@@ -30,6 +30,6 @@ struct lmct_config {
 extern struct lmct_config lmct_conf;
 
 void
-init_lmct_config();
+init_lmct_config(const char *);
 
 #endif /* LMCT_CONFIG_H */

@@ -93,8 +93,9 @@ create_conntrack_entry(void *data, uint32_t data_size)
 struct lmct_config lmct_conf;
 
 void
-init_lmct_config()
+init_lmct_config(const char *config_file_path)
 {
+    (void) config_file_path;
     lmct_conf.max_entries_to_migrate = 10000;
     lmct_conf.log_lvl = INFO;
 }
@@ -103,7 +104,7 @@ init_lmct_config()
 
 START_TEST(test_marshal)
 {
-    init_lmct_config();
+    init_lmct_config(NULL);
     struct data_template *tmpl;
     tmpl = create_template();
     struct conntrack_store *store;
@@ -184,7 +185,7 @@ END_TEST
 
 START_TEST(test_marshal_for_zone)
 {
-    init_lmct_config();
+    init_lmct_config(NULL);
     struct data_template *tmpl;
     tmpl = create_template();
     struct conntrack_store *store;
@@ -275,7 +276,7 @@ END_TEST
 
 START_TEST(test_marshal_empty_conntrack_store)
 {
-    init_lmct_config();
+    init_lmct_config(NULL);
     struct data_template *tmpl;
     tmpl = create_template();
     struct conntrack_store *store;
@@ -303,7 +304,7 @@ END_TEST
 
 START_TEST(test_marshal_null_conntrack_store)
 {
-    init_lmct_config();
+    init_lmct_config(NULL);
     struct data_template *tmpl;
     tmpl = create_template();
 
@@ -328,7 +329,7 @@ END_TEST
 
 START_TEST(test_marshal_null_template)
 {
-    init_lmct_config();
+    init_lmct_config(NULL);
     struct conntrack_store *store;
     store = create_conntrack_store();
 
@@ -353,7 +354,7 @@ END_TEST
 
 START_TEST(test_marshal_null_template_null_conntrack_store)
 {
-    init_lmct_config();
+    init_lmct_config(NULL);
     uint32_t data_size;
     uint32_t exp_data_size;
     void *buffer = marshal(NULL, NULL, &data_size);
@@ -375,7 +376,7 @@ END_TEST
 
 START_TEST(test_marshal_conntrack_store_exceeded_limits)
 {
-    init_lmct_config();
+    init_lmct_config(NULL);
     lmct_conf.max_entries_to_migrate = 2;
 
     struct data_template *tmpl;
