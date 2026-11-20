@@ -36,6 +36,7 @@ Following libraries are required and can be easily installed using yum.
  - libnetfilter_conntrack, libnetfilter_conntrack-devel
  - libmnl, libmnl-devel
  - glib2, glib2-devel
+ - libuuid, libuuid-devel
  - gcc, make, gdbus-codegen
 
 ### Compile
@@ -46,16 +47,26 @@ foo@bar:~$ make all
 This will create the conntrack-migrator binary in the build folder.
 
 ## Running on host.
-On the source hypervisor (SAVE MODE):
+Legacy IP-based, on the source hypervisor (SAVE MODE):
 ```shell-session
 foo@bar:~$ DBUS_SYSTEM_BUS_ADDRESS=<dbus address> conntrack_migrator 2 <helper-id> <num of ip address> <space separated list of ip addresses>
 foo@bar:~$ DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/system_dbus_socket conntrack_migrator 2 id1 2 1.1.1.1 2.2.2.2
 ```
 
-On the destination hypervisor (LOAD MODE):
+Legacy IP-based, on the destination hypervisor (LOAD MODE):
 ```shell-session
 foo@bar:~$ DBUS_SYSTEM_BUS_ADDRESS=<dbus address> conntrack_migrator 1 <helper-id>
-foo@bar:~$ DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/system_dbus_socket conntrack_migrator 2 id1
+foo@bar:~$ DBUS_SYSTEM_BUS_ADDRESS=unix:path=/run/system_dbus_socket conntrack_migrator 1 id1
+```
+
+Port/CT-zone-based, on the source hypervisor (SAVE MODE). Each entry is a port UUID and the CT zone owned by that port:
+```shell-session
+foo@bar:~$ DBUS_SYSTEM_BUS_ADDRESS=<dbus address> conntrack_migrator 2 <helper-id> <N> <port_uuid_1> <old_ct_zone_1> ... <port_uuid_N> <old_ct_zone_N>
+```
+
+Port/CT-zone-based, on the destination hypervisor (LOAD MODE). Each entry is a port UUID, the zone on the source, and the zone to program on this host:
+```shell-session
+foo@bar:~$ DBUS_SYSTEM_BUS_ADDRESS=<dbus address> conntrack_migrator 1 <helper-id> <N> <port_uuid_1> <old_ct_zone_1> <new_ct_zone_1> ... <port_uuid_N> <old_ct_zone_N> <new_ct_zone_N>
 ```
 
 ## Testing

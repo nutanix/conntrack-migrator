@@ -67,15 +67,20 @@ check_attr(int attr, void *exp, struct conntrack_entry *ct)
     case CT_ATTR_L4_SRC_PORT:
     case CT_ATTR_L4_DST_PORT:
     case CT_ATTR_ICMP_SRC_ID:
+    case CT_ATTR_L4_SRC_PORT_REPL:
+    case CT_ATTR_L4_DST_PORT_REPL:
         tmp_u16 = offset;
         exp_u16 = exp;
         ck_assert(*tmp_u16 == *exp_u16);
         break;
     case CT_ATTR_L3_SRC_V4:
     case CT_ATTR_L3_DST_V4:
+    case CT_ATTR_L3_SRC_V4_REPL:
+    case CT_ATTR_L3_DST_V4_REPL:
     case CT_ATTR_TIMEOUT:
     case CT_ATTR_MARK:
     case CT_ATTR_STATUS:
+    
         tmp_u32 = offset;
         exp_u32 = exp;
         ck_assert(*tmp_u32 == *exp_u32);
@@ -107,6 +112,14 @@ START_TEST(test_conntrack_entry_new)
 }
 END_TEST
 
+/*
+ * Zone-mode behaviour (the SAVE_IPS_OP vs SAVE_PORT_ZONE_OP branch and the
+ * is_zone_only_slot() filtering) is driven purely by op_type, not by the L4
+ * protocol: the reply slots are populated from generic NF attributes and the
+ * mode selection runs the same codepath for TCP/UDP/ICMP alike. So exercising
+ * both modes once here is enough; repeating it in the UDP/ICMP tests would only
+ * re-cover the identical op_type logic without adding any new coverage.
+ */
 START_TEST(test_conntrack_entry_from_nf_conntrack_without_label_tcp)
 {
     struct nf_conntrack *ct;
@@ -116,6 +129,8 @@ START_TEST(test_conntrack_entry_from_nf_conntrack_without_label_tcp)
     uint8_t l4proto = IPPROTO_TCP;
     uint16_t src_port = htons(20);
     uint16_t dst_port = htons(10);
+    uint16_t repl_src_port = htons(30);
+    uint16_t repl_dst_port = htons(40);
     uint8_t tcp_state = TCP_CONNTRACK_SYN_SENT;
     uint32_t timeout = 100;
 
@@ -130,8 +145,14 @@ START_TEST(test_conntrack_entry_from_nf_conntrack_without_label_tcp)
     nfct_set_attr_u16(ct, ATTR_PORT_DST, dst_port);
     nfct_set_attr_u8(ct, ATTR_TCP_STATE, tcp_state);
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
+    nfct_set_attr_u32(ct, ATTR_REPL_IPV4_SRC, inet_addr("3.3.3.3"));
+    nfct_set_attr_u32(ct, ATTR_REPL_IPV4_DST, inet_addr("4.4.4.4"));
+    nfct_set_attr_u16(ct, ATTR_REPL_PORT_SRC, repl_src_port);
+    nfct_set_attr_u16(ct, ATTR_REPL_PORT_DST, repl_dst_port);
 
-    entry = conntrack_entry_from_nf_conntrack(ct);
+    /* IP mode: legacy slots present; zone-only reply slots are skipped to
+     * keep the payload byte-identical to the ip-mode wire format. */
+    entry = conntrack_entry_from_nf_conntrack(ct, SAVE_IPS_OP);
     ck_assert(entry != NULL);
 
     inet_aton("1.1.1.1", &inp);
@@ -144,6 +165,31 @@ START_TEST(test_conntrack_entry_from_nf_conntrack_without_label_tcp)
     check_attr(CT_ATTR_L4_DST_PORT, &dst_port, entry);
     check_attr(CT_ATTR_TCP_STATE, &tcp_state, entry);
     check_attr(CT_ATTR_TIMEOUT, &timeout, entry);
+    ck_assert(is_set_in_bitmap(entry->bitmap, CT_ATTR_L3_SRC_V4_REPL) == 0);
+    ck_assert(is_set_in_bitmap(entry->bitmap, CT_ATTR_L3_DST_V4_REPL) == 0);
+    ck_assert(is_set_in_bitmap(entry->bitmap, CT_ATTR_L4_SRC_PORT_REPL) == 0);
+    ck_assert(is_set_in_bitmap(entry->bitmap, CT_ATTR_L4_DST_PORT_REPL) == 0);
+    conntrack_entry_destroy(entry);
+
+    /* Zone mode: same legacy slots PLUS the NAT'd reply slots. */
+    entry = conntrack_entry_from_nf_conntrack(ct, SAVE_PORT_ZONE_OP);
+    ck_assert(entry != NULL);
+
+    inet_aton("1.1.1.1", &inp);
+    check_attr(CT_ATTR_L3_SRC_V4, &(inp.s_addr), entry);
+    inet_aton("2.2.2.2", &inp);
+    check_attr(CT_ATTR_L3_DST_V4, &(inp.s_addr), entry);
+    check_attr(CT_ATTR_L4_SRC_PORT, &src_port, entry);
+    check_attr(CT_ATTR_L4_DST_PORT, &dst_port, entry);
+    check_attr(CT_ATTR_TCP_STATE, &tcp_state, entry);
+    check_attr(CT_ATTR_TIMEOUT, &timeout, entry);
+    inet_aton("3.3.3.3", &inp);
+    check_attr(CT_ATTR_L3_SRC_V4_REPL, &(inp.s_addr), entry);
+    inet_aton("4.4.4.4", &inp);
+    check_attr(CT_ATTR_L3_DST_V4_REPL, &(inp.s_addr), entry);
+    check_attr(CT_ATTR_L4_SRC_PORT_REPL, &repl_src_port, entry);
+    check_attr(CT_ATTR_L4_DST_PORT_REPL, &repl_dst_port, entry);
+    conntrack_entry_destroy(entry);
 }
 END_TEST
 
@@ -169,7 +215,7 @@ START_TEST(test_conntrack_entry_from_nf_conntrack_without_label_udp)
     nfct_set_attr_u16(ct, ATTR_PORT_DST, dst_port);
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
 
-    entry = conntrack_entry_from_nf_conntrack(ct);
+    entry = conntrack_entry_from_nf_conntrack(ct, SAVE_IPS_OP);
     ck_assert(entry != NULL);
 
     inet_aton("1.1.1.1", &inp);
@@ -208,7 +254,7 @@ START_TEST(test_conntrack_entry_from_nf_conntrack_without_label_icmp)
     nfct_set_attr_u8(ct, ATTR_ICMP_TYPE, type);
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
 
-    entry = conntrack_entry_from_nf_conntrack(ct);
+    entry = conntrack_entry_from_nf_conntrack(ct, SAVE_IPS_OP);
     ck_assert(entry != NULL);
 
     inet_aton("1.1.1.1", &inp);
@@ -258,7 +304,7 @@ START_TEST(test_conntrack_entry_from_nf_conntrack_with_label_tcp)
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
     nfct_set_attr(ct, ATTR_CONNLABELS, label);
 
-    entry = conntrack_entry_from_nf_conntrack(ct);
+    entry = conntrack_entry_from_nf_conntrack(ct, SAVE_IPS_OP);
     ck_assert(entry != NULL);
 
     inet_aton("1.1.1.1", &inp);
@@ -306,7 +352,7 @@ START_TEST(test_conntrack_entry_from_nf_conntrack_with_label_udp)
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
     nfct_set_attr(ct, ATTR_CONNLABELS, label);
 
-    entry = conntrack_entry_from_nf_conntrack(ct);
+    entry = conntrack_entry_from_nf_conntrack(ct, SAVE_IPS_OP);
     ck_assert(entry != NULL);
 
     inet_aton("1.1.1.1", &inp);
@@ -355,7 +401,7 @@ START_TEST(test_conntrack_entry_from_nf_conntrack_with_label_icmp)
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
     nfct_set_attr(ct, ATTR_CONNLABELS, label);
 
-    entry = conntrack_entry_from_nf_conntrack(ct);
+    entry = conntrack_entry_from_nf_conntrack(ct, SAVE_IPS_OP);
     ck_assert(entry != NULL);
 
     inet_aton("1.1.1.1", &inp);
@@ -400,7 +446,7 @@ START_TEST(test_get_conntrack_entry_from_update_attr_added)
     nfct_set_attr_u8(ct, ATTR_TCP_STATE, tcp_state);
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
 
-    entry = conntrack_entry_from_nf_conntrack(ct);
+    entry = conntrack_entry_from_nf_conntrack(ct, SAVE_IPS_OP);
     ck_assert(entry != NULL);
 
     updated_ct = nfct_clone(ct);
@@ -413,7 +459,7 @@ START_TEST(test_get_conntrack_entry_from_update_attr_added)
     nfct_bitmask_set_bit(label, 96);
     nfct_set_attr(updated_ct, ATTR_CONNLABELS, label);
 
-    updated_entry = get_conntrack_entry_from_update(entry, updated_ct);
+    updated_entry = get_conntrack_entry_from_update(entry, updated_ct, SAVE_IPS_OP);
     ck_assert(updated_entry != NULL);
 
     inet_aton("1.1.1.1", &inp);
@@ -457,13 +503,13 @@ START_TEST(test_get_conntrack_entry_from_update_attr_updated)
     nfct_set_attr_u8(ct, ATTR_TCP_STATE, tcp_state);
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, timeout);
 
-    entry = conntrack_entry_from_nf_conntrack(ct);
+    entry = conntrack_entry_from_nf_conntrack(ct, SAVE_IPS_OP);
     ck_assert(entry != NULL);
 
     updated_ct = nfct_clone(ct);
     nfct_set_attr_u8(updated_ct, ATTR_TCP_STATE, new_tcp_state);
 
-    updated_entry = get_conntrack_entry_from_update(entry, updated_ct);
+    updated_entry = get_conntrack_entry_from_update(entry, updated_ct, SAVE_IPS_OP);
     ck_assert(updated_entry != NULL);
 
     inet_aton("1.1.1.1", &inp);
@@ -503,6 +549,38 @@ START_TEST(test_conntrack_entry_destroy_g_wrapper)
 }
 END_TEST
 
+START_TEST(test_conntrack_entry_from_nf_conntrack_null)
+{
+    /* A NULL nf_conntrack must be rejected in both sub-modes. */
+    ck_assert(conntrack_entry_from_nf_conntrack(NULL, SAVE_IPS_OP) == NULL);
+    ck_assert(conntrack_entry_from_nf_conntrack(NULL, SAVE_PORT_ZONE_OP) == NULL);
+}
+END_TEST
+
+START_TEST(test_get_conntrack_entry_from_update_null)
+{
+    struct nf_conntrack *ct;
+    struct conntrack_entry *entry;
+
+    ct = nfct_new();
+    ck_assert(ct != NULL);
+    nfct_set_attr_u8(ct, ATTR_L3PROTO, AF_INET);
+    nfct_set_attr_u32(ct, ATTR_IPV4_SRC, inet_addr("1.1.1.1"));
+    nfct_set_attr_u32(ct, ATTR_IPV4_DST, inet_addr("2.2.2.2"));
+    nfct_set_attr_u8(ct, ATTR_L4PROTO, IPPROTO_TCP);
+
+    entry = conntrack_entry_from_nf_conntrack(ct, SAVE_IPS_OP);
+    ck_assert(entry != NULL);
+
+    /* Either operand being NULL must yield NULL, not a crash. */
+    ck_assert(get_conntrack_entry_from_update(NULL, ct, SAVE_IPS_OP) == NULL);
+    ck_assert(get_conntrack_entry_from_update(entry, NULL, SAVE_IPS_OP) == NULL);
+
+    conntrack_entry_destroy(entry);
+    nfct_destroy(ct);
+}
+END_TEST
+
 Suite *
 conntrack_entry_suite(void)
 {
@@ -525,6 +603,8 @@ conntrack_entry_suite(void)
     tcase_add_test(tc_core, test_get_conntrack_entry_from_update_attr_updated);
     tcase_add_test(tc_core, test_conntrack_entry_destroy);
     tcase_add_test(tc_core, test_conntrack_entry_destroy_g_wrapper);
+    tcase_add_test(tc_core, test_conntrack_entry_from_nf_conntrack_null);
+    tcase_add_test(tc_core, test_get_conntrack_entry_from_update_null);
 
     suite_add_tcase(s, tc_core);
 

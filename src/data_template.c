@@ -24,24 +24,33 @@
 #include "data_template.h"
 
 /**
- * Allocates a new data_template and intialises all its fields.
+ * Allocate a data_template for @op_type.
+ * - SAVE_IPS_OP uses CT_ATTR_LEGACY_NUM_BITS.
+ * - SAVE_PORT_ZONE_OP uses CT_ATTR_MAX.
+ * - Allocation failure exits the process.
+ *
+ * Args:
+ *   @op_type SAVE sub-mode.
  *
  * Returns:
- *   pointer to the allocated memory if success.
- *   In case of error, terminates the process.
+ *   New template. Caller frees it with data_template_destroy().
  */
 struct data_template *
-data_template_new(void)
+data_template_new(enum save_mode_op_type op_type)
 {
     struct data_template *data_tmpl;
     int i;
+    uint8_t num_bits;
+
+    num_bits = (op_type == SAVE_IPS_OP) ? CT_ATTR_LEGACY_NUM_BITS
+                                        : CT_ATTR_MAX;
 
     data_tmpl = g_malloc0(sizeof(struct data_template));
-    data_tmpl->num_bits = CT_ATTR_MAX;
-    data_tmpl->payload_size = CT_ATTR_MAX * UINT8_T_SIZE;
-    data_tmpl->payload = g_malloc0(sizeof(uint8_t) * CT_ATTR_MAX);
+    data_tmpl->num_bits = num_bits;
+    data_tmpl->payload_size = num_bits * UINT8_T_SIZE;
+    data_tmpl->payload = g_malloc0(sizeof(uint8_t) * num_bits);
 
-    for (i = CT_ATTR_MIN; i < CT_ATTR_MAX; i++) {
+    for (i = CT_ATTR_MIN; i < num_bits; i++) {
         data_tmpl->payload[i] = ct_entry_attr_to_size[i];
     }
 

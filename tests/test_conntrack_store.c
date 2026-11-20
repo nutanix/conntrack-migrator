@@ -19,6 +19,9 @@
 #include "conntrack_store.h"
 
 // ========================= START of dummy functions =========================
+// records the op_type the store forwarded to the entry builders
+static enum save_mode_op_type last_op_type_seen;
+
 void
 conntrack_entry_destroy_g_wrapper(void *obj)
 {
@@ -32,9 +35,11 @@ conntrack_entry_destroy_g_wrapper(void *obj)
  * CT-MARK - 0: return correct entry
 * */
 struct conntrack_entry *
-conntrack_entry_from_nf_conntrack(struct nf_conntrack *ct)
+conntrack_entry_from_nf_conntrack(const struct nf_conntrack *ct,
+                                  enum save_mode_op_type op_type)
 {
     struct conntrack_entry *entry = g_malloc(sizeof(struct conntrack_entry));
+    last_op_type_seen = op_type;
     entry->data_size = nfct_get_attr_u32(ct, ATTR_TIMEOUT);
     uint32_t ct_mark = nfct_get_attr_u32(ct, ATTR_MARK);
 
@@ -46,9 +51,11 @@ conntrack_entry_from_nf_conntrack(struct nf_conntrack *ct)
 
 struct conntrack_entry *
 get_conntrack_entry_from_update(struct conntrack_entry *e,
-                                struct nf_conntrack *ct)
+                                const struct nf_conntrack *ct,
+                                enum save_mode_op_type op_type)
 {
     struct conntrack_entry *entry = g_malloc(sizeof(struct conntrack_entry));
+    last_op_type_seen = op_type;
     entry->data_size = nfct_get_attr_u32(ct, ATTR_TIMEOUT);
     uint32_t ct_mark = nfct_get_attr_u32(ct, ATTR_MARK);
     if (ct_mark == 1)
@@ -93,7 +100,7 @@ START_TEST(test_update_conntrack_store_new_event)
     nfct_set_attr_u32(ct, ATTR_MARK, 0);
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, 100);
 
-    update_conntrack_store(store, ct, NFCT_T_NEW);
+    update_conntrack_store(store, ct, NFCT_T_NEW, SAVE_IPS_OP);
 
     ck_assert_int_eq(g_hash_table_size(store->store), 1);
 
@@ -102,6 +109,7 @@ START_TEST(test_update_conntrack_store_new_event)
 
     ck_assert(ct_entry != NULL); // entry should be present in the hashtable
     ck_assert(ct_entry->data_size == 100); // this should be equal to timeout
+    ck_assert(last_op_type_seen == SAVE_IPS_OP); // op_type forwarded to entry builder
 }
 END_TEST
 
@@ -129,7 +137,7 @@ START_TEST(test_update_conntrack_store_new_event_ct_entry_failed)
     nfct_set_attr_u32(ct, ATTR_MARK, 1);
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, 100);
 
-    update_conntrack_store(store, ct, NFCT_T_NEW);
+    update_conntrack_store(store, ct, NFCT_T_NEW, SAVE_IPS_OP);
 
     ck_assert_int_eq(g_hash_table_size(store->store), 0);
     const gpointer key = GINT_TO_POINTER(t);
@@ -157,7 +165,7 @@ START_TEST(test_update_conntrack_store_new_event_ct_entry_invalid_id)
     nfct_set_attr_u32(ct, ATTR_MARK, 0);
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, 100);
 
-    update_conntrack_store(store, ct, NFCT_T_NEW);
+    update_conntrack_store(store, ct, NFCT_T_NEW, SAVE_IPS_OP);
 
     ck_assert_int_eq(g_hash_table_size(store->store), 0);
 }
@@ -186,11 +194,11 @@ START_TEST(test_update_conntrack_store_update_event)
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, 100);
 
     // first create an entry in the store
-    update_conntrack_store(store, ct, NFCT_T_NEW);
+    update_conntrack_store(store, ct, NFCT_T_NEW, SAVE_IPS_OP);
 
     // update the entry
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, 200);
-    update_conntrack_store(store, ct, NFCT_T_UPDATE);
+    update_conntrack_store(store, ct, NFCT_T_UPDATE, SAVE_IPS_OP);
 
     ck_assert_int_eq(g_hash_table_size(store->store), 1);
     const gpointer key = GINT_TO_POINTER(t);
@@ -225,7 +233,7 @@ START_TEST(test_update_conntrack_store_update_event_for_non_existent_entry)
     ck_assert_int_eq(g_hash_table_size(store->store), 0);
 
     // Directly send the update
-    update_conntrack_store(store, ct, NFCT_T_UPDATE);
+    update_conntrack_store(store, ct, NFCT_T_UPDATE, SAVE_IPS_OP);
 
     ck_assert_int_eq(g_hash_table_size(store->store), 1);
     const gpointer key = GINT_TO_POINTER(t);
@@ -257,7 +265,7 @@ START_TEST(test_update_conntrack_store_update_event_ct_entry_failed)
     nfct_set_attr_u32(ct, ATTR_MARK, 0);
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, 100);
 
-    update_conntrack_store(store, ct, NFCT_T_NEW);
+    update_conntrack_store(store, ct, NFCT_T_NEW, SAVE_IPS_OP);
     ck_assert_int_eq(g_hash_table_size(store->store), 1);
 
     // send the update, but make get_conntrack_entry_from_update to return NULL
@@ -265,7 +273,7 @@ START_TEST(test_update_conntrack_store_update_event_ct_entry_failed)
 
     // this makes the dummy fn get_conntrack_entry_from_update return NULL
     nfct_set_attr_u32(ct, ATTR_MARK, 1);
-    update_conntrack_store(store, ct, NFCT_T_UPDATE);
+    update_conntrack_store(store, ct, NFCT_T_UPDATE, SAVE_IPS_OP);
 
     ck_assert_int_eq(g_hash_table_size(store->store), 1);
     const gpointer key = GINT_TO_POINTER(t);
@@ -294,7 +302,7 @@ START_TEST(test_update_conntrack_store_update_event_ct_entry_invalid_id)
     nfct_set_attr_u32(ct, ATTR_MARK, 0);
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, 100);
 
-    update_conntrack_store(store, ct, NFCT_T_UPDATE);
+    update_conntrack_store(store, ct, NFCT_T_UPDATE, SAVE_IPS_OP);
 
     ck_assert_int_eq(g_hash_table_size(store->store), 0);
 }
@@ -321,10 +329,10 @@ START_TEST(test_update_conntrack_store_destroy_event)
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, 100);
 
     // first create an entry in the store
-    update_conntrack_store(store, ct, NFCT_T_NEW);
+    update_conntrack_store(store, ct, NFCT_T_NEW, SAVE_IPS_OP);
 
     // destroy the entry
-    update_conntrack_store(store, ct, NFCT_T_DESTROY);
+    update_conntrack_store(store, ct, NFCT_T_DESTROY, SAVE_IPS_OP);
 
     ck_assert_int_eq(g_hash_table_size(store->store), 0);
 }
@@ -353,7 +361,7 @@ START_TEST(test_update_conntrack_store_destroy_event_non_existent_entry)
     ck_assert_int_eq(g_hash_table_size(store->store), 0);
 
     // Directly send destroy with creating the entry.
-    update_conntrack_store(store, ct, NFCT_T_DESTROY);
+    update_conntrack_store(store, ct, NFCT_T_DESTROY, SAVE_IPS_OP);
 
     ck_assert_int_eq(g_hash_table_size(store->store), 0);
 }
@@ -379,7 +387,7 @@ START_TEST(test_update_conntrack_store_destroy_event_ct_entry_invalid_id)
     nfct_set_attr_u32(ct, ATTR_TIMEOUT, 100);
 
     // destroy the entry
-    update_conntrack_store(store, ct, NFCT_T_DESTROY);
+    update_conntrack_store(store, ct, NFCT_T_DESTROY, SAVE_IPS_OP);
 
     ck_assert_int_eq(g_hash_table_size(store->store), 0);
 }
@@ -406,7 +414,7 @@ START_TEST(test_update_conntrack_store_unknown_event)
     nfct_set_attr_u32(ct, ATTR_ID, 10);
 
     // Send an unknown event
-    update_conntrack_store(store, ct, NFCT_T_UNKNOWN);
+    update_conntrack_store(store, ct, NFCT_T_UNKNOWN, SAVE_IPS_OP);
 
     // check no change to hashtable size
     ck_assert_int_eq(g_hash_table_size(store->store), 0);
@@ -435,6 +443,53 @@ START_TEST(test_conntrack_store_destroy)
 }
 END_TEST
 
+START_TEST(test_update_conntrack_store_forwards_zone_op_type)
+{
+    struct conntrack_store *store;
+    struct nf_conntrack *ct;
+    int t = 10;
+
+    store = conntrack_store_new();
+    ck_assert(store != NULL);
+    ck_assert(store->store != NULL);
+
+    ct = nfct_new();
+    nfct_set_attr_u8(ct, ATTR_L3PROTO, AF_INET);
+    nfct_set_attr_u32(ct, ATTR_IPV4_SRC, inet_addr("1.1.1.1"));
+    nfct_set_attr_u32(ct, ATTR_IPV4_DST, inet_addr("2.2.2.2"));
+    nfct_set_attr_u8(ct, ATTR_L4PROTO, IPPROTO_TCP);
+    nfct_set_attr_u32(ct, ATTR_ID, t);
+    nfct_set_attr_u32(ct, ATTR_MARK, 0);
+    nfct_set_attr_u32(ct, ATTR_TIMEOUT, 100);
+
+    // NEW path -> conntrack_entry_from_nf_conntrack receives the mode
+    last_op_type_seen = SAVE_IPS_OP;
+    update_conntrack_store(store, ct, NFCT_T_NEW, SAVE_PORT_ZONE_OP);
+    ck_assert(last_op_type_seen == SAVE_PORT_ZONE_OP);
+
+    // UPDATE (existing entry) path -> get_conntrack_entry_from_update receives the mode
+    last_op_type_seen = SAVE_IPS_OP;
+    nfct_set_attr_u32(ct, ATTR_TIMEOUT, 200);
+    update_conntrack_store(store, ct, NFCT_T_UPDATE, SAVE_PORT_ZONE_OP);
+    ck_assert(last_op_type_seen == SAVE_PORT_ZONE_OP);
+}
+END_TEST
+
+START_TEST(test_update_conntrack_store_null_ct)
+{
+    struct conntrack_store *store;
+
+    store = conntrack_store_new();
+    ck_assert(store != NULL);
+    ck_assert(store->store != NULL);
+
+    // NULL ct must be ignored (no crash) and leave the store untouched
+    update_conntrack_store(store, NULL, NFCT_T_NEW, SAVE_IPS_OP);
+
+    ck_assert_int_eq(g_hash_table_size(store->store), 0);
+}
+END_TEST
+
 Suite *
 conntrack_store_suite(void)
 {
@@ -459,6 +514,8 @@ conntrack_store_suite(void)
     tcase_add_test(tc_core, test_update_conntrack_store_destroy_event_ct_entry_invalid_id);
     tcase_add_test(tc_core, test_update_conntrack_store_unknown_event);
     tcase_add_test(tc_core, test_conntrack_store_destroy);
+    tcase_add_test(tc_core, test_update_conntrack_store_forwards_zone_op_type);
+    tcase_add_test(tc_core, test_update_conntrack_store_null_ct);
 
     suite_add_tcase(s, tc_core);
 

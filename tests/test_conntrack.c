@@ -55,8 +55,9 @@ gboolean cmp_ct(gpointer key, gpointer value, gpointer user_data) {
 
 void
 update_conntrack_store(struct conntrack_store *conn_store,
-                       struct nf_conntrack *ct,
-                       enum nf_conntrack_msg_type type)
+                       const struct nf_conntrack *ct,
+                       enum nf_conntrack_msg_type type,
+                       enum save_mode_op_type op_type)
 {
     // For the purpose of testing we are using ct mark as id. because
     // ct_id is not known while programming so validation becomes easier.
@@ -89,11 +90,17 @@ update_conntrack_store(struct conntrack_store *conn_store,
         break;
     }
 }
+
+const char *
+convert_save_mode_op_type_to_string(enum save_mode_op_type op_type)
+{
+    return op_type == SAVE_IPS_OP ? "ips" : "port_zone";
+}
 //=========================End of dependencies=================================
 
 //=========================Start of HELPER Functions =========================
 GHashTable *
-ht_from_ip_list(const char *ip_list[], int num_ips)
+ht_from_ip_list(const char *const ip_list[], int num_ips)
 {
     int i;
     GHashTable *ht;
@@ -102,6 +109,19 @@ ht_from_ip_list(const char *ip_list[], int num_ips)
         struct in_addr ip;
         inet_aton(ip_list[i], &ip);
         g_hash_table_insert(ht, GUINT_TO_POINTER(ip.s_addr),
+                            GINT_TO_POINTER(1));
+    }
+    return ht;
+}
+
+GHashTable *
+ht_from_zone_list(const uint16_t zones[], int num_zones)
+{
+    int i;
+    GHashTable *ht;
+    ht = g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, NULL);
+    for (i = 0; i < num_zones; i++) {
+        g_hash_table_insert(ht, GUINT_TO_POINTER((guint) zones[i]),
                             GINT_TO_POINTER(1));
     }
     return ht;
@@ -308,10 +328,14 @@ START_TEST(test_conntrack_dump)
     ck_assert(h != NULL);
 
     const char *ips[] = { "1.1.1.1", "2.2.2.2" };
-    GHashTable *ips_to_migrate = ht_from_ip_list(ips, 5);
+    GHashTable *ips_to_migrate = ht_from_ip_list(ips, 2);
     ck_assert(ips_to_migrate != NULL);
 
-    ret = get_conntrack_dump(h, ips_to_migrate);
+    struct save_mode_config save_config = {
+        .op_type = SAVE_IPS_OP,
+        .ips_to_migrate = ips_to_migrate
+    };
+    ret = get_conntrack_dump(h, &save_config);
 
     ck_assert(ret == 0);
     ck_assert(g_hash_table_size(conn_store->store) == 4);
@@ -323,6 +347,79 @@ START_TEST(test_conntrack_dump)
         verify_ct(ct, exp[i]);
     }
 
+}
+END_TEST
+
+START_TEST(test_conntrack_dump_for_zone)
+{
+    conn_store = create_conntrack_store();
+    int num = 6;
+
+    // Zones 10 and 20 are migrated; zone 99 is not, so it must be ignored.
+    // Only ATTR_ZONE is read by the zone filter (ct_get_migration_zone).
+    struct nf_conntrack *zone_entry1 = ct_new(
+        "1.1.1.1", "2.2.2.2", 1024, 9090, TCP_CONNTRACK_ESTABLISHED, 1000, 1);
+    nfct_set_attr_u16(zone_entry1, ATTR_ZONE, 10);
+    struct nf_conntrack *zone_entry2 = ct_new(
+        "1.1.1.1", "2.2.2.2", 1029, 9091, TCP_CONNTRACK_SYN_SENT, 1000, 2);
+    nfct_set_attr_u16(zone_entry2, ATTR_ZONE, 10);
+    struct nf_conntrack *zone_entry3 = ct_new(
+        "3.3.3.3", "4.4.4.4", 1024, 9090, TCP_CONNTRACK_ESTABLISHED, 1000, 3);
+    nfct_set_attr_u16(zone_entry3, ATTR_ZONE, 20);
+    struct nf_conntrack *zone_entry4 = ct_new(
+        "5.5.5.5", "6.6.6.6", 1024, 9090, TCP_CONNTRACK_ESTABLISHED, 1000, 4);
+    nfct_set_attr_u16(zone_entry4, ATTR_ZONE, 99);
+
+    struct nf_conntrack *ct_list[6] = {
+        zone_entry1,
+        zone_entry2,
+        zone_entry3,
+        zone_entry4,
+        // zone-less entry -> rejected by validate_ct_entry in zone mode.
+        ct_new("7.7.7.7", "8.8.8.8", 1024, 9090,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 5),
+        ct_new_ipv6("::1", "fe80::1ff:fe23:4567:890a", 1024, 9090,
+                    TCP_CONNTRACK_ESTABLISHED, 1000, 6)
+    };
+    struct nf_conntrack *exp[3] = {
+        ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 1),
+        ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
+               TCP_CONNTRACK_SYN_SENT, 1000, 2),
+        ct_new("3.3.3.3", "4.4.4.4", 1024, 9090,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 3),
+    };
+
+    int ret = flush_conntrack_for_test();
+    ck_assert(ret == 0);
+
+    ret = conntrack_op_for_test(ct_list, num, NFCT_Q_CREATE);
+    ck_assert(ret == 0);
+
+    struct nfct_handle *h = nfct_open(CONNTRACK, 0);
+    ck_assert(h != NULL);
+
+    const uint16_t zones[] = { 10, 20 };
+    GHashTable *zones_to_migrate = ht_from_zone_list(zones, 2);
+    ck_assert(zones_to_migrate != NULL);
+
+    struct save_mode_config save_config = {
+        .op_type = SAVE_PORT_ZONE_OP,
+        .zones_to_migrate = zones_to_migrate
+    };
+    ret = get_conntrack_dump(h, &save_config);
+
+    ck_assert(ret == 0);
+    ck_assert(g_hash_table_size(conn_store->store) == 3);
+
+    uint16_t exp_zone[3] = { 10, 10, 20 };
+    int i;
+    for (i = 0; i < 3; i++) {
+        struct nf_conntrack *ct;
+        ct = g_hash_table_lookup(conn_store->store, GUINT_TO_POINTER(i+1));
+        verify_ct(ct, exp[i]);
+        ck_assert(nfct_get_attr_u16(ct, ATTR_ZONE) == exp_zone[i]);
+    }
 }
 END_TEST
 
@@ -464,6 +561,7 @@ START_TEST(test_delete_conntrack)
     ck_assert(ips_on_host != NULL);
 
     struct ct_delete_args args  = {
+        .op_type = SAVE_IPS_OP,
         .ips_migrated = ips_migrated,
         .ips_on_host = ips_on_host,
         .clear_called = true,
@@ -484,7 +582,11 @@ START_TEST(test_delete_conntrack)
                             "4.4.4.4", "5.5.5.5", "7.7.7.7" };
     GHashTable *ips_to_migrate = ht_from_ip_list(_ips_to_mig, 6);
 
-    ret = get_conntrack_dump(h, ips_to_migrate);
+    struct save_mode_config save_config = {
+        .op_type = SAVE_IPS_OP,
+        .ips_to_migrate = ips_to_migrate
+    };
+    ret = get_conntrack_dump(h, &save_config);
     ck_assert(ret == 0);
     ck_assert(g_hash_table_size(conn_store->store) == 2);
 
@@ -494,6 +596,95 @@ START_TEST(test_delete_conntrack)
 
     ct = g_hash_table_lookup(conn_store->store, GUINT_TO_POINTER(5));
     verify_ct(ct, exp[1]);
+}
+END_TEST
+
+START_TEST(test_delete_conntrack_for_zone)
+{
+    conn_store = create_conntrack_store();
+    int num = 5;
+
+    // Zones 10 and 20 are migrated; zone 20 is still owned by a port on
+    // this host, so its entries must be preserved. Zone 99 and the
+    // zone-less entry are untouched by the zone-mode delete.
+    struct nf_conntrack *zone_entry1 = ct_new(
+        "1.1.1.1", "2.2.2.2", 1024, 9090, TCP_CONNTRACK_ESTABLISHED, 1000, 1);
+    nfct_set_attr_u16(zone_entry1, ATTR_ZONE, 10);
+    struct nf_conntrack *zone_entry2 = ct_new(
+        "1.1.1.1", "2.2.2.2", 1029, 9091, TCP_CONNTRACK_SYN_SENT, 1000, 2);
+    nfct_set_attr_u16(zone_entry2, ATTR_ZONE, 10);
+    struct nf_conntrack *zone_entry3 = ct_new(
+        "3.3.3.3", "4.4.4.4", 1024, 9090, TCP_CONNTRACK_ESTABLISHED, 1000, 3);
+    nfct_set_attr_u16(zone_entry3, ATTR_ZONE, 20);
+    struct nf_conntrack *zone_entry4 = ct_new(
+        "5.5.5.5", "6.6.6.6", 1024, 9090, TCP_CONNTRACK_ESTABLISHED, 1000, 4);
+    nfct_set_attr_u16(zone_entry4, ATTR_ZONE, 99);
+
+    struct nf_conntrack *ct_list[5] = {
+        zone_entry1,
+        zone_entry2,
+        zone_entry3,
+        zone_entry4,
+        ct_new("7.7.7.7", "8.8.8.8", 1024, 9090,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 5)
+    };
+
+    int ret = flush_conntrack_for_test();
+    ck_assert(ret == 0);
+
+    ret = conntrack_op_for_test(ct_list, num, NFCT_Q_CREATE);
+    ck_assert(ret == 0);
+
+    struct nfct_handle *h = nfct_open(CONNTRACK, 0);
+    ck_assert(h != NULL);
+
+    // Now migrate zones 10 and 20; zone 20 is still on the host.
+    const uint16_t migrated[] = { 10, 20 };
+    GHashTable *zones_migrated = ht_from_zone_list(migrated, 2);
+    const uint16_t on_host[] = { 20 };
+    GHashTable *zones_on_host = ht_from_zone_list(on_host, 1);
+
+    ck_assert(zones_migrated != NULL);
+    ck_assert(zones_on_host != NULL);
+
+    struct ct_delete_args args = {
+        .op_type = SAVE_PORT_ZONE_OP,
+        .zones_migrated = zones_migrated,
+        .zones_on_host = zones_on_host,
+        .clear_called = true,
+        .mutex = PTHREAD_MUTEX_INITIALIZER,
+        .clear_called_cond = PTHREAD_COND_INITIALIZER
+    };
+
+    delete_ct_entries(&args);
+
+    // Only the zone-10 entries (mark 1, 2) should be gone. Dump back zones
+    // {10, 20, 99}: zone 10 is included so a failed delete would show up.
+    struct nf_conntrack *exp[2] = {
+        ct_new("3.3.3.3", "4.4.4.4", 1024, 9090,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 3),
+        ct_new("5.5.5.5", "6.6.6.6", 1024, 9090,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 4)
+    };
+    const uint16_t verify_zones[] = { 10, 20, 99 };
+    GHashTable *zones_to_migrate = ht_from_zone_list(verify_zones, 3);
+
+    struct save_mode_config save_config = {
+        .op_type = SAVE_PORT_ZONE_OP,
+        .zones_to_migrate = zones_to_migrate
+    };
+    ret = get_conntrack_dump(h, &save_config);
+    ck_assert(ret == 0);
+    ck_assert(g_hash_table_size(conn_store->store) == 2);
+
+    struct nf_conntrack *ct;
+    ct = g_hash_table_lookup(conn_store->store, GUINT_TO_POINTER(3));
+    verify_ct(ct, exp[0]);
+    ck_assert(nfct_get_attr_u16(ct, ATTR_ZONE) == 20);
+
+    ct = g_hash_table_lookup(conn_store->store, GUINT_TO_POINTER(4));
+    verify_ct(ct, exp[1]);
+    ck_assert(nfct_get_attr_u16(ct, ATTR_ZONE) == 99);
 }
 END_TEST
 
@@ -512,7 +703,7 @@ pthread_wrapper_ct_events(void *data)
                         NF_NETLINK_CONNTRACK_DESTROY,
                         MNL_SOCKET_AUTOPID);
     ck_assert(ret >=0);
-    listen_for_conntrack_events(nl, targs->ips_to_migrate,
+    listen_for_conntrack_events(nl, targs->save_config,
                                 targs->is_src, targs->stop_flag);
     mnl_socket_close(nl);
 
@@ -560,8 +751,12 @@ START_TEST(test_conntrack_events_for_src)
     ck_assert(ips_to_migrate != NULL);
 
     stop_flag = false;
+    struct save_mode_config save_config = {
+        .op_type = SAVE_IPS_OP,
+        .ips_to_migrate = ips_to_migrate
+    };
     struct ct_events_targs args;
-    args.ips_to_migrate = ips_to_migrate;
+    args.save_config = &save_config;
     args.stop_flag = &stop_flag;
     args.is_src = true;
 
@@ -667,8 +862,12 @@ START_TEST(test_conntrack_events_for_dst)
     ck_assert(ips_to_migrate != NULL);
 
     stop_flag = false;
+    struct save_mode_config save_config = {
+        .op_type = SAVE_IPS_OP,
+        .ips_to_migrate = ips_to_migrate
+    };
     struct ct_events_targs args;
-    args.ips_to_migrate = ips_to_migrate;
+    args.save_config = &save_config;
     args.stop_flag = &stop_flag;
     args.is_src = false;
 
@@ -733,6 +932,121 @@ START_TEST(test_conntrack_events_for_dst)
 }
 END_TEST
 
+START_TEST(test_conntrack_events_for_zone)
+{
+    conn_store = create_conntrack_store();
+    int num = 5;
+
+    // Zones 10 and 20 are migrated; zone 99 and the zone-less entry must
+    // be ignored by the in-callback zone match.
+    struct nf_conntrack *zone_entry1 = ct_new(
+        "1.1.1.1", "2.2.2.2", 1024, 9090, TCP_CONNTRACK_ESTABLISHED, 1000, 1);
+    nfct_set_attr_u16(zone_entry1, ATTR_ZONE, 10);
+    struct nf_conntrack *zone_entry2 = ct_new(
+        "1.1.1.1", "2.2.2.2", 1029, 9091, TCP_CONNTRACK_SYN_SENT, 1000, 2);
+    nfct_set_attr_u16(zone_entry2, ATTR_ZONE, 10);
+    struct nf_conntrack *zone_entry3 = ct_new(
+        "3.3.3.3", "4.4.4.4", 1024, 9090, TCP_CONNTRACK_ESTABLISHED, 1000, 3);
+    nfct_set_attr_u16(zone_entry3, ATTR_ZONE, 20);
+    struct nf_conntrack *zone_entry4 = ct_new(
+        "5.5.5.5", "6.6.6.6", 1024, 9090, TCP_CONNTRACK_ESTABLISHED, 1000, 4);
+    nfct_set_attr_u16(zone_entry4, ATTR_ZONE, 99);
+
+    struct nf_conntrack *ct_list[5] = {
+        zone_entry1,
+        zone_entry2,
+        zone_entry3,
+        zone_entry4,
+        // zone-less entry -> rejected by validate_ct_entry in zone mode.
+        ct_new("7.7.7.7", "8.8.8.8", 1024, 9090,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 5)
+    };
+
+    int ret = flush_conntrack_for_test();
+    ck_assert(ret == 0);
+
+    const uint16_t zones[] = { 10, 20 };
+    GHashTable *zones_to_migrate = ht_from_zone_list(zones, 2);
+    ck_assert(zones_to_migrate != NULL);
+
+    // is_src is ignored in zone mode (no BPF filter; the callback matches
+    // on CT zone regardless of direction), so a single test suffices.
+    stop_flag = false;
+    struct save_mode_config save_config = {
+        .op_type = SAVE_PORT_ZONE_OP,
+        .zones_to_migrate = zones_to_migrate
+    };
+    struct ct_events_targs args;
+    args.save_config = &save_config;
+    args.stop_flag = &stop_flag;
+    args.is_src = true;
+
+    ret = pthread_create(&args.tid, NULL, &pthread_wrapper_ct_events, &args);
+    ck_assert(ret == 0);
+    sleep(1);
+
+    // create 5 CTs
+    ret = conntrack_op_for_test(ct_list, num, NFCT_Q_CREATE);
+    ck_assert(ret == 0);
+    sleep(1);
+
+    // verify that we should have received events for 3 entries
+    struct nf_conntrack *exp[3] = {
+        ct_new("1.1.1.1", "2.2.2.2", 1024, 9090,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 1),
+        ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
+               TCP_CONNTRACK_SYN_SENT, 1000, 2),
+        ct_new("3.3.3.3", "4.4.4.4", 1024, 9090,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 3),
+    };
+    ck_assert(g_hash_table_size(conn_store->store) == 3);
+    uint16_t exp_zone[3] = { 10, 10, 20 };
+    int i;
+    for (i = 0; i < 3; i++) {
+        struct nf_conntrack *ct;
+        ct = g_hash_table_lookup(conn_store->store, GUINT_TO_POINTER(i+1));
+        verify_ct(ct, exp[i]);
+        ck_assert(nfct_get_attr_u16(ct, ATTR_ZONE) == exp_zone[i]);
+    }
+
+    // Now send update to the 2nd entry. syn_sent -> established. Zone must
+    // stay 10 so the kernel matches the existing entry in that zone.
+    struct nf_conntrack *upd[1] = {
+        ct_new("1.1.1.1", "2.2.2.2", 1029, 9091,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 2)
+    };
+    nfct_set_attr_u16(upd[0], ATTR_ZONE, 10);
+    ret = conntrack_op_for_test(upd, 1, NFCT_Q_UPDATE);
+    ck_assert(ret == 0);
+    sleep(1);
+
+    // verify that the entry is updated in our local store as well
+    ck_assert(g_hash_table_size(conn_store->store) == 3);
+    struct nf_conntrack *ct;
+    ct = g_hash_table_lookup(conn_store->store, GUINT_TO_POINTER(2));
+    verify_ct(ct, upd[0]);
+    ck_assert(nfct_get_attr_u16(ct, ATTR_ZONE) == 10);
+
+    // Finally delete 1 entries
+    struct nf_conntrack *delete[1] = {
+        ct_new("3.3.3.3", "4.4.4.4", 1024, 9090,
+               TCP_CONNTRACK_ESTABLISHED, 1000, 3)
+    };
+    nfct_set_attr_u16(delete[0], ATTR_ZONE, 20);
+    ret = conntrack_op_for_test(delete, 1, NFCT_Q_DESTROY);
+    ck_assert(ret == 0);
+    sleep(1);
+
+    // verify that hashtable size is reduced to 2 now.
+    ck_assert(g_hash_table_size(conn_store->store) == 2);
+    ct = g_hash_table_lookup(conn_store->store, GUINT_TO_POINTER(3));
+    ck_assert(ct == NULL);
+
+    stop_flag = true;
+    pthread_join(args.tid, NULL);
+}
+END_TEST
+
 Suite *
 conntrack_suite(void)
 {
@@ -746,11 +1060,14 @@ conntrack_suite(void)
     tcase_set_timeout(tc_core, 10);
 
     tcase_add_test(tc_core, test_conntrack_dump);
+    tcase_add_test(tc_core, test_conntrack_dump_for_zone);
     tcase_add_test(tc_core, test_append_ct_to_batch);
     tcase_add_test(tc_core, test_create_batch_conntrack);
     tcase_add_test(tc_core, test_delete_conntrack);
+    tcase_add_test(tc_core, test_delete_conntrack_for_zone);
     tcase_add_test(tc_core, test_conntrack_events_for_src);
     tcase_add_test(tc_core, test_conntrack_events_for_dst);
+    tcase_add_test(tc_core, test_conntrack_events_for_zone);
 
     suite_add_tcase(s, tc_core);
 

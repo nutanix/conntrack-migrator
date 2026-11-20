@@ -39,7 +39,11 @@ int ct_entry_attr_to_size[CT_ATTR_MAX] =
     [CT_ATTR_TIMEOUT] = UINT32_T_SIZE,
     [CT_ATTR_MARK] = UINT32_T_SIZE,
     [CT_ATTR_STATUS] = UINT32_T_SIZE,
-    [CT_ATTR_LABEL] = UINT32_T_SIZE * CT_LABEL_NUM_WORDS
+    [CT_ATTR_LABEL] = UINT32_T_SIZE * CT_LABEL_NUM_WORDS,
+    [CT_ATTR_L3_SRC_V4_REPL] = UINT32_T_SIZE,
+    [CT_ATTR_L3_DST_V4_REPL] = UINT32_T_SIZE,
+    [CT_ATTR_L4_SRC_PORT_REPL] = UINT16_T_SIZE,
+    [CT_ATTR_L4_DST_PORT_REPL] = UINT16_T_SIZE
 };
 // ========================= END of dependencies ==================
 
@@ -48,7 +52,19 @@ START_TEST(test_data_template_new)
     struct data_template *tmpl;
     int i;
 
-    tmpl = data_template_new();
+    /* IP mode advertises only the legacy schema. */
+    tmpl = data_template_new(SAVE_IPS_OP);
+    ck_assert(tmpl != NULL);
+    ck_assert(tmpl->num_bits == CT_ATTR_LEGACY_NUM_BITS);
+    ck_assert(tmpl->payload_size == CT_ATTR_LEGACY_NUM_BITS * UINT8_T_SIZE);
+    ck_assert(tmpl->payload != NULL);
+    for (i = CT_ATTR_MIN; i < CT_ATTR_LEGACY_NUM_BITS; i++) {
+        ck_assert(tmpl->payload[i] == ct_entry_attr_to_size[i]);
+    }
+    data_template_destroy(tmpl);
+
+    /* Zone mode advertises every slot, including NAT'd-reply slots. */
+    tmpl = data_template_new(SAVE_PORT_ZONE_OP);
     ck_assert(tmpl != NULL);
     ck_assert(tmpl->num_bits == CT_ATTR_MAX);
     ck_assert(tmpl->payload_size == CT_ATTR_MAX * UINT8_T_SIZE);
@@ -56,6 +72,7 @@ START_TEST(test_data_template_new)
     for (i = CT_ATTR_MIN; i < CT_ATTR_MAX; i++) {
         ck_assert(tmpl->payload[i] == ct_entry_attr_to_size[i]);
     }
+    data_template_destroy(tmpl);
 }
 END_TEST
 
@@ -63,19 +80,24 @@ START_TEST(test_data_template_destroy)
 {
     struct data_template *tmpl;
 
-    tmpl = data_template_new();
+    tmpl = data_template_new(SAVE_IPS_OP);
 
-    /* Test 1: Destroying template with payload does not cause core-dump */
+    /* Test 1: Destroying IP mode template with payload does not cause core-dump */
     data_template_destroy(tmpl);
 
-    /* Test 2: Destroying tempalte without any payload does not cause
+    tmpl = data_template_new(SAVE_PORT_ZONE_OP);
+
+    /* Test 2: Destroying zone mode template with payload does not cause core-dump */
+    data_template_destroy(tmpl);
+
+    /* Test 3: Destroying template without any payload does not cause
      * any SIGSEGV
      */
     tmpl = g_malloc(sizeof(struct data_template));
     tmpl->payload = NULL;
     data_template_destroy(tmpl);
 
-    /* Test 3: Destroying NULL template does not cause any SIGSEGV */
+    /* Test 4: Destroying NULL template does not cause any SIGSEGV */
     data_template_destroy(NULL);
 }
 END_TEST
