@@ -34,9 +34,14 @@
 #define PORT_UUID_PREFIX_LEN (sizeof(PORT_UUID_PREFIX) - 1)
 
 /**
- * Returns a human-readable name for a SAVE sub-mode.
+ * Name for a SAVE sub-mode.
+ * - IPS or PORT_ZONE. Unknown values return "UNKNOWN".
  *
- * See declaration in common.h for full doc.
+ * Args:
+ *   @op_type SAVE sub-mode.
+ *
+ * Returns:
+ *   Static string. Do not free.
  */
 const char *
 convert_save_mode_op_type_to_string(enum save_mode_op_type op_type)
@@ -183,9 +188,15 @@ parse_ct_zone(const char *s, uint16_t *out)
 }
 
 /**
- * Ensures a CLI argument is an integer >= @min_value.
+ * Parse a CLI argument as an int >= @min_value.
+ * - An empty string or trailing junk calls errx().
+ * - Call only from check_args(), before fork.
  *
- * See declaration in common.h for the full contract.
+ * Args:
+ *   @arg_value raw argv string.
+ *   @out_value parsed int. Untouched on failure.
+ *   @arg_name  name used in the error.
+ *   @min_value lowest accepted value, inclusive.
  */
 void
 ensure_cli_arg_is_int_at_least(const char *arg_value, int *out_value,

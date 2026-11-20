@@ -43,6 +43,18 @@ static const char *dbus_name = "org.qemu.VMState1";
 static const char *manager_export_path = "/org/qemu";
 static const char *object_path = "/org/qemu/VMState1";
 
+/**
+ * Finish a successful Load RPC.
+ * - Sends the success reply.
+ * - Quits the dbus loop.
+ *
+ * Args:
+ *   @object     VMState1 object.
+ *   @invocation invocation to complete.
+ *
+ * Returns:
+ *   TRUE.
+ */
 static gboolean
 complete_on_load(VMState1 *object, GDBusMethodInvocation *invocation)
 {
@@ -353,6 +365,18 @@ on_save(VMState1 *object, GDBusMethodInvocation *invocation, gpointer user_data)
     return TRUE;
 }
 
+/**
+ * Finish a successful Clear RPC.
+ * - Sends the success reply.
+ * - Quits the dbus loop.
+ *
+ * Args:
+ *   @object     LmctMgmt object.
+ *   @invocation invocation to complete.
+ *
+ * Returns:
+ *   TRUE.
+ */
 static gboolean
 complete_on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation)
 {
@@ -361,9 +385,19 @@ complete_on_clear(LmctMgmt *object, GDBusMethodInvocation *invocation)
     return TRUE;
 }
 
-/* Clear payload was rejected. Wake the delete thread so the process can
- * exit, but tell it not to destroy entries, and report the error to the
- * D-Bus client. */
+/**
+ * Reject a Clear RPC.
+ * - Wakes the delete thread and sets clear_failed so it skips the dump.
+ * - Returns a D-Bus error to the client.
+ * - Quits the dbus loop.
+ *
+ * Args:
+ *   @invocation invocation to fail.
+ *   @message    error text sent to the client.
+ *
+ * Returns:
+ *   TRUE.
+ */
 static gboolean
 fail_on_clear(GDBusMethodInvocation *invocation, const char *message)
 {
@@ -649,9 +683,11 @@ err:
 }
 
 /**
- * Asks the dbus thread to exit its main loop gracefully.
+ * Ask the dbus thread to leave its main loop.
+ * - See dbus_server.h for the quit contract.
  *
- * See declaration in dbus_server.h for the full contract.
+ * Args:
+ *   @targs dbus thread args. NULL is ignored.
  */
 void
 dbus_server_request_quit(struct dbus_targs *targs)

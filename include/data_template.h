@@ -30,18 +30,12 @@ struct data_template {
 };
 
 /**
- * Allocates a wire-format data_template sized to @op_type.
+ * Allocate a data_template for @op_type.
+ * - SAVE_IPS_OP uses CT_ATTR_LEGACY_NUM_BITS (21), matching a v1.0 SAVE payload.
+ * - SAVE_PORT_ZONE_OP uses CT_ATTR_MAX, including the NAT reply slots.
+ * - Caller frees the result with data_template_destroy().
  *
- * SAVE_IPS_OP        -> num_bits = CT_ATTR_LEGACY_NUM_BITS (21).
- *                       Byte-identical to what a v1.0 SAVE binary
- *                       emits, so a v1.0 LOAD receiver remains a
- *                       valid migration target.
- * SAVE_PORT_ZONE_OP  -> num_bits = CT_ATTR_MAX. Includes the
- *                       appended NAT'd-reply slots that only
- *                       zone-mode payloads ever set.
- *
- * Caller owns the returned pointer and must free with
- * data_template_destroy().
+ * @op_type SAVE sub-mode.
  */
 struct data_template *
 data_template_new(enum save_mode_op_type);

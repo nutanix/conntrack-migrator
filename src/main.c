@@ -125,6 +125,14 @@ struct ct_delete_args ct_del_args = {
     .clear_called_cond = PTHREAD_COND_INITIALIZER
 };
 
+/**
+ * Set the pthread name.
+ * - A failure is logged and ignored.
+ *
+ * Args:
+ *   @tid  thread.
+ *   @name name to set.
+ */
 static void
 set_thread_name(pthread_t tid, const char *name)
 {
@@ -135,7 +143,15 @@ set_thread_name(pthread_t tid, const char *name)
     }
 }
 
-/* Publish the result of mnl_socket_bind so start_in_save_mode can wait. */
+/**
+ * Publish the socket-bind result.
+ * - Wakes start_in_save_mode.
+ * - Called on open failure and after bind returns.
+ *
+ * Args:
+ *   @targs    events-thread args.
+ *   @bound_ok true when the socket is bound.
+ */
 static void
 signal_events_socket_ready(struct ct_events_targs *targs, bool bound_ok)
 {
@@ -146,6 +162,15 @@ signal_events_socket_ready(struct ct_events_targs *targs, bool bound_ok)
     pthread_mutex_unlock(&targs->ready_mu);
 }
 
+/**
+ * Wait until the events thread has finished bind.
+ *
+ * Args:
+ *   @targs events-thread args.
+ *
+ * Returns:
+ *   true if bind succeeded.
+ */
 static bool
 wait_until_events_socket_ready(struct ct_events_targs *targs)
 {
@@ -160,6 +185,13 @@ wait_until_events_socket_ready(struct ct_events_targs *targs)
     return ok;
 }
 
+/**
+ * Destroy the bind barrier and free the events args.
+ * - NULL is ignored.
+ *
+ * Args:
+ *   @targs events-thread args.
+ */
 static void
 free_events_targs(struct ct_events_targs *targs)
 {
@@ -248,24 +280,19 @@ dump_conntrack(struct save_mode_config *save_config)
 }
 
 /**
- * Spawn a single ct_events thread with the given is_src flag and
- * pthread name. On success the thread owns the freshly allocated
- * struct ct_events_targs and the caller receives it via @out_targs
- * for later pthread_join + g_free. On failure @*out_targs is left
- * untouched and the partial allocation is released here.
+ * Start one conntrack-events thread.
+ * - On success the caller owns @out_targs. Join it, then free_events_targs().
+ * - On failure @out_targs is left unchanged and the allocation is freed here.
  *
  * Args:
- *   @save_config SAVE-mode config threaded down to the events
- *                callback (read-only over the thread's lifetime).
- *   @stop_flag   shared stop flag the thread polls for graceful exit.
- *   @is_src      true for src-filtered BPF (IP mode src thread);
- *                false for dst-filtered (IP mode dst thread) or for
- *                the unfiltered zone-mode thread.
- *   @thread_name pthread_setname_np tag; logged on rename failure.
- *   @out_targs   output: owning pointer to the thread args bundle.
+ *   @save_config read-only SAVE config for the callback.
+ *   @stop_flag   shared stop flag.
+ *   @is_src      true for the IP src thread. False for the IP dst or zone thread.
+ *   @thread_name pthread name.
+ *   @out_targs   receives the thread args.
  *
  * Returns:
- *   0 on success, -1 on pthread_create failure.
+ *   0 on success, -1 if the barrier or the thread cannot be created.
  */
 static int
 create_events_thread(struct save_mode_config *save_config, bool *stop_flag,
@@ -307,18 +334,11 @@ create_events_thread(struct save_mode_config *save_config, bool *stop_flag,
 }
 
 /**
- * Spawn the conntrack delete thread.
- *
- * Mode-aware via ct_del_args.op_type and the migrated-set pointers the
- * caller has already populated on ct_del_args before this call. The
- * thread is started in BOTH save sub-modes; its lifetime is what
- * keeps the DBus main loop responsive to on_clear until the Clear
- * IPC arrives and complete_on_clear drives g_main_loop_quit. Removing
- * it for a mode would leave pthread_join in dmain waiting forever.
+ * Start the delete thread on the already filled ct_del_args.
+ * - The thread blocks until clear_called.
  *
  * Returns:
- *   0 on success, -1 on pthread_create failure (in which case the
- *   thread does not exist and ct_del_args.tid is left untouched).
+ *   0 on success, -1 if pthread_create fails. tid is left unset.
  */
 static int
 create_delete_thread(void)
@@ -337,34 +357,19 @@ create_delete_thread(void)
 }
 
 /**
- * Start threads required for save mode of operation.
- *
- * Following things are performed in the save mode:
- * 1. Conntrack delete thread is started which waits till Clear IPC is
- *    called. The thread is started in both IP and zone sub-modes; it
- *    dispatches on ct_del_args.op_type when it wakes up.
- * 2. Conntrack events threads are started to filter events for the
- *    migration targets. In IP mode this is two BPF-filtered threads
- *    (one src, one dst). In zone mode BPF can't filter on CT zone, so a
- *    single unfiltered thread is started and the callback does the zone
- *    match in-process.
- *    If any update is received for a non-existent entry, it is treated
- *    as NEW since it contains the base five tuple information required to
- *    identify flow. Similarly, if a destroy event is received for a
- *    non-existent entry, it is ignored.
- * 3. Finally, Conntrack dump is taken from the kernel to get all the live
- *    flows in the system.
- *
- * The above workflow is used to maintain a local copy of the CT entries for
- * the VM.
+ * Start the SAVE workers, then dump the live flows.
+ * - No entries, or more than 127 IPs: return 0 and start nothing.
+ * - Record the migrated set on ct_del_args and start the delete thread.
+ * - IP mode: src and dst event threads. Zone mode: one event thread.
+ * - Dump only after those sockets are bound.
+ * - On failure, join whatever started and wake the delete thread.
  *
  * Args:
- *   @save_config SAVE-mode config (mode-aware) for which CT entries have
- *                to be migrated.
- *   @stop_flag flag used by thread to exit after dbus operations.
+ *   @save_config entries to migrate.
+ *   @stop_flag   shared stop flag for the event threads.
  *
  * Returns:
- *   0 in case of success, -1 otherwise
+ *   0 on success, -1 otherwise.
  */
 static int
 start_in_save_mode(struct save_mode_config *save_config, bool *stop_flag)
@@ -511,22 +516,15 @@ create_ips_ht_from_args(const char *const argv[], int num_ips)
 }
 
 /**
- * Creates the zones_to_migrate hashtable from the SAVE port-zone CLI
- * arguments.
- *
- * Walks argv at the SAVE_PORT_ZONE_STRIDE-strided offsets, extracts the
- * old_ct_zone column (the port_uuid column has already been validated
- * pre-fork by check_zone_save_args and is otherwise discarded - the
- * delete path filters strictly on CT zone), and hands the array to
- * create_hashtable_from_zone_list().
+ * Build the zones_to_migrate table from the SAVE port-zone CLI.
+ * - Reads the old_ct_zone column. port_uuid is not stored.
  *
  * Args:
- *   @argv      array of CLI args.
- *   @n_entries declared entry count from cli_mode_config.num_entries
- *              (already validated by check_zone_save_args pre-fork).
+ *   @argv      CLI arguments.
+ *   @n_entries declared entry count. Must be > 0.
  *
  * Returns:
- *   zones_to_migrate hashtable on success, NULL on failure.
+ *   Zone hashtable, or NULL.
  */
 static GHashTable *
 create_zones_ht_from_args(const char *const argv[], int n_entries)
@@ -566,30 +564,19 @@ create_zones_ht_from_args(const char *const argv[], int n_entries)
 }
 
 /**
- * Decides which SAVE-mode CLI layout we are looking at by comparing the
- * number of trailing argv slots against the declared entry count N:
- *
- *   ratio = (argc - ENTRIES_LIST_START_ARG_INDEX) / N
- *     ratio == 1 -> SAVE_IPS_OP        (one IP per entry)
- *     ratio == 2 -> SAVE_PORT_ZONE_OP  (port_uuid + old_zone per entry)
- *
- * The "no list / N == 0" cases default to SAVE_IPS_OP so the existing
- * "VM with no IPv4 NICs" passthrough in start_in_save_mode() stays intact.
- *
- * Called once pre-fork from check_save_mode_args(); the detected op_type
- * and declared N are recorded on cli_mode_config and read by dmain()
- * after the double fork rather than re-detected.
+ * Pick the SAVE layout from the trailing argument count.
+ * - No list: SAVE_IPS_OP and @out_n_entries = 0.
+ * - N IPs: SAVE_IPS_OP.
+ * - N port/zone pairs: SAVE_PORT_ZONE_OP.
+ * - Any other shape calls errx().
  *
  * Args:
- *   @argc           num of CLI arguments.
- *   @argv           array of CLI arguments.
- *   @out_n_entries  output for the declared entry count. Set to 0 on the
- *                   "no list" shortcut so the caller can record it on
- *                   cli_mode_config without an extra parse of argv[3].
+ *   @argc          argument count.
+ *   @argv          CLI arguments.
+ *   @out_n_entries declared N. 0 when there is no list.
  *
  * Returns:
- *   The detected sub-mode. Aborts the process via errx() on a shape
- *   mismatch (declared N is non-zero but trailing args fit neither layout).
+ *   Detected sub-mode.
  */
 static enum save_mode_op_type
 detect_save_mode_op_type(int argc, const char *const argv[], int *out_n_entries)
@@ -623,30 +610,18 @@ detect_save_mode_op_type(int argc, const char *const argv[], int *out_n_entries)
 }
 
 /**
- * Decides which LOAD-mode CLI layout we are looking at.
- *
- * Legacy LOAD is strictly: `conntrack_migrator 1 <helper_id>` (argc == 3).
- * New LOAD is:             `conntrack_migrator 1 <helper_id> <N>
- *                              <port_uuid> <old_ct_zone> <new_ct_zone> ...`
- *                          (argc == 4 + 3*N).
- *
- * Anything else is a hard error - we deliberately do NOT silently fall back
- * to legacy if the trailing args do not match the new shape.
- *
- * Called once pre-fork from check_load_mode_args(); the detected op_type
- * and declared N are recorded on cli_mode_config and read by dmain()
- * after the double fork rather than re-detected (mirroring
- * detect_save_mode_op_type above).
+ * Pick the LOAD layout.
+ * - argc == 3: LOAD_IPS_OP and @out_n_entries = 0.
+ * - argc == 4 + 3*N: LOAD_PORT_ZONE_OP.
+ * - Anything else calls errx(). No fallback to legacy LOAD.
  *
  * Args:
- *   @argc           num of CLI arguments.
- *   @argv           array of CLI arguments.
- *   @out_n_entries  output for the declared entry count. Set to 0 on the
- *                   legacy shortcut so the caller can record it on
- *                   cli_mode_config without an extra parse of argv[3].
+ *   @argc          argument count.
+ *   @argv          CLI arguments.
+ *   @out_n_entries declared N. 0 for legacy LOAD.
  *
  * Returns:
- *   The detected sub-mode. Aborts the process via errx() on any mismatch.
+ *   Detected sub-mode.
  */
 static enum load_mode_op_type
 detect_load_mode_op_type(int argc, const char *const argv[], int *out_n_entries)
@@ -703,6 +678,18 @@ check_mode(int mode)
     }
 }
 
+/**
+ * Build the SAVE config from the parsed CLI.
+ * - IP mode stores the IP hashtable.
+ * - Zone mode stores the zone hashtable.
+ *
+ * Args:
+ *   @argv CLI arguments.
+ *   @cli  parsed CLI. Caller is in SAVE mode.
+ *
+ * Returns:
+ *   New config, or NULL if the hashtable cannot be built.
+ */
 static struct save_mode_config *
 build_save_mode_config(const char *const argv[],
                        const struct cli_mode_config *cli)
@@ -723,7 +710,17 @@ build_save_mode_config(const char *const argv[],
     return create_save_mode_config_for_port_zone_mode(zones_ht);
 }
 
-/* Caller must be in LOAD_MODE. load_op_type is the active union arm only then. */
+/**
+ * Build the LOAD config from the parsed CLI.
+ * - Legacy mode has no zone map.
+ * - Port-zone mode takes ownership of cli->src_dst_zone_map.
+ *
+ * Args:
+ *   @cli parsed CLI. Caller is in LOAD mode.
+ *
+ * Returns:
+ *   New config.
+ */
 static struct load_mode_config *
 build_load_mode_config(const struct cli_mode_config *cli)
 {
@@ -744,6 +741,21 @@ build_load_mode_config(const struct cli_mode_config *cli)
     return load_config;
 }
 
+/**
+ * Fill the dbus args and start the dbus thread.
+ * - LOAD mode builds load_config. SAVE leaves it NULL.
+ *
+ * Args:
+ *   @args           thread args to fill.
+ *   @cli            parsed CLI.
+ *   @helper_id      helper id for the dbus object.
+ *   @stop_flag      shared stop flag.
+ *   @loop_mu_inited set true once loop_mu is initialised.
+ *
+ * Returns:
+ *   0 on success, EINVAL if the LOAD config cannot be built,
+ *   EAGAIN if the mutex or thread cannot be created.
+ */
 static int
 start_dbus_server(struct dbus_targs *args, const struct cli_mode_config *cli,
                   const char *helper_id, bool *stop_flag, bool *loop_mu_inited)
@@ -966,19 +978,14 @@ check_ip_save_args(int argc, const char *const argv[])
 }
 
 /**
- * Per-entry content checks for the new SAVE port-zone layout.
- *
- * Arity (argc vs declared N) is guaranteed by detect_save_mode_op_type()
- * before we get here, so we only validate the *content* of each entry:
- *  - port_uuid is a port-prefixed canonical UUID of the form
- *    "port_<8-4-4-4-12>" (total length 41),
- *  - old_ct_zone parses cleanly as uint16.
- *
- * Aborts the process via errx() on the first malformed entry.
+ * Check each SAVE port-zone entry. The count is already known.
+ * - port_uuid must be a valid port UUID and must not repeat.
+ * - old_ct_zone must be a uint16.
+ * - The first bad entry calls errx().
  *
  * Args:
- *   @n    declared entry count, already parsed by detect_save_mode_op_type().
- *   @argv array of CLI arguments.
+ *   @n    declared entry count.
+ *   @argv CLI arguments.
  */
 static void
 check_zone_save_args(int n, const char *const argv[])
@@ -1018,33 +1025,17 @@ check_zone_save_args(int n, const char *const argv[])
 }
 
 /**
- * Per-entry content checks for the new LOAD port-zone layout, folded
- * with the (old_zone -> new_zone) src-to-dst zone map build into a
- * single argv pass.
- *
- * Arity is guaranteed by detect_load_mode_op_type(); we validate the content
- * of each (port_uuid, old_ct_zone, new_ct_zone) triple and, on success,
- * insert (old_zone -> new_zone) into a freshly allocated hashtable.
- * Returning the map directly (instead of validating now and reparsing
- * post-fork via a separate builder) lets dmain() consume
- * cli->src_dst_zone_map without re-walking argv. The port_uuid column
- * is content-checked here but not stored: at LOAD time each CT entry
- * only carries ATTR_ZONE, so the only usable pivot is
- * old_zone -> new_zone.
- *
- * If two entries declare the same old_zone with different new_zones, the
- * last write wins and a WARNING is logged. Bad input (malformed UUID or
- * unparseable zone) aborts the process via errx(), matching the fail-fast
- * contract of all other check_*_args helpers.
+ * Check each LOAD port-zone triple and build old_zone -> new_zone.
+ * - port_uuid is checked and not stored.
+ * - A repeated old_zone keeps the last new_zone and logs a warning.
+ * - A bad UUID or zone calls errx().
  *
  * Args:
- *   @argc num of arguments (used only for an arity sanity check).
- *   @argv array of CLI arguments.
+ *   @n    declared entry count.
+ *   @argv CLI arguments.
  *
  * Returns:
- *   Newly allocated (old_zone -> new_zone) hashtable. Ownership transfers
- *   to the caller; consumed by
- *   create_load_mode_config_for_port_zone_mode() in dmain().
+ *   New map. The caller owns it.
  */
 static GHashTable *
 check_zone_load_args(int n, const char *const argv[])
@@ -1104,20 +1095,15 @@ check_zone_load_args(int n, const char *const argv[])
 }
 
 /**
- * Top-level SAVE-mode arg dispatcher.
- *
- * Picks IP vs port-zone via detect_save_mode_op_type() and delegates
- * per-entry validation to the appropriate validator. Reports the
- * detected sub-op_type and the declared entry count to the caller so they
- * can be recorded on cli_mode_config without an extra argv parse.
+ * Check SAVE arguments.
+ * - Detect IP vs port-zone, then run that checker.
+ * - Write the detected op type and N when the output pointers are non-NULL.
  *
  * Args:
- *   @argc          num of arguments.
- *   @argv          array of CLI arguments.
- *   @out_op_type   output pointer for the detected sub-op_type. May be NULL.
- *   @out_n_entries output pointer for the declared entry count, captured
- *                  from detect_save_mode_op_type's existing parse. May be
- *                  NULL. 0 on the SAVE-IP "no list" shortcut.
+ *   @argc          argument count.
+ *   @argv          CLI arguments.
+ *   @out_op_type   detected sub-mode. May be NULL.
+ *   @out_n_entries declared N. 0 when there is no IP list. May be NULL.
  */
 static void
 check_save_mode_args(int argc, const char *const argv[],
@@ -1147,29 +1133,18 @@ check_save_mode_args(int argc, const char *const argv[],
 }
 
 /**
- * Top-level LOAD-mode arg dispatcher.
- *
- * Legacy LOAD takes no extra args beyond <mode> <helper_id>; the new LOAD
- * port-zone layout is content-validated AND the (old_zone -> new_zone)
- * src-to-dst zone map is built in the same pass via check_zone_load_args().
- * The built map is published to the caller so dmain() can wrap it
- * post-fork without re-walking argv.
- *
- * Reports the detected sub-op_type and the declared entry count to the
- * caller so they can be recorded on cli_mode_config without an extra
- * argv parse.
+ * Check LOAD arguments.
+ * - Legacy LOAD has no extra arguments and no zone map.
+ * - Port-zone LOAD is checked by check_zone_load_args(), which builds the map.
+ * - Write the op type, N, and map when the output pointers are non-NULL.
+ * - A NULL map pointer drops the new map instead of leaking it.
  *
  * Args:
- *   @argc                num of arguments.
- *   @argv                array of CLI arguments.
- *   @out_op_type         output pointer for the detected sub-op_type. May be NULL.
- *   @out_n_entries       output pointer for the declared entry count, captured
- *                        from detect_load_mode_op_type's existing parse. May be
- *                        NULL. 0 on the LOAD legacy shortcut.
- *   @out_src_dst_zone_map output pointer for the freshly built src-to-dst
- *                        zone map. May be NULL (caller doesn't care). Always
- *                        set to NULL for LOAD_IPS_OP; non-NULL for
- *                        LOAD_PORT_ZONE_OP. Ownership transfers to the caller.
+ *   @argc                 argument count.
+ *   @argv                 CLI arguments.
+ *   @out_op_type          detected sub-mode. May be NULL.
+ *   @out_n_entries        declared N. 0 for legacy LOAD. May be NULL.
+ *   @out_src_dst_zone_map zone map. NULL for legacy LOAD. Caller owns it.
  */
 static void
 check_load_mode_args(int argc, const char *const argv[],

@@ -63,15 +63,12 @@ void *
 dbus_server_init(void *);
 
 /**
- * Asks the dbus thread to exit its main loop gracefully.
+ * Ask the dbus thread to leave its main loop.
+ * - Safe from any thread.
+ * - Safe before the loop exists: should_quit is latched and applied when the loop is published.
+ * - NULL is a no-op.
  *
- * Safe to call from any thread, and safe to call before
- * dbus_server_init has finished creating the loop: a pre-loop quit
- * request is latched on should_quit and honoured the moment init
- * publishes the loop, so the thread exits without ever entering
- * g_main_loop_run.
- *
- * No-op on NULL @targs.
+ * @targs dbus thread args.
  */
 void
 dbus_server_request_quit(struct dbus_targs *);

@@ -24,13 +24,16 @@
 #include "data_template.h"
 
 /**
- * Allocates a new data_template sized to @op_type.
+ * Allocate a data_template for @op_type.
+ * - SAVE_IPS_OP uses CT_ATTR_LEGACY_NUM_BITS.
+ * - SAVE_PORT_ZONE_OP uses CT_ATTR_MAX.
+ * - Allocation failure exits the process.
  *
- * See the header for the per-op_type wire-format contract.
+ * Args:
+ *   @op_type SAVE sub-mode.
  *
  * Returns:
- *   pointer to the allocated memory if success.
- *   In case of error, terminates the process.
+ *   New template. Caller frees it with data_template_destroy().
  */
 struct data_template *
 data_template_new(enum save_mode_op_type op_type)

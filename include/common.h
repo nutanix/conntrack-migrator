@@ -139,15 +139,13 @@ bool
 parse_ct_zone(const char *, uint16_t *);
 
 /**
- * Parses a CLI argument as an integer >= @min_value.
- *
- * Rejects an empty string and trailing junk such as "1xyz".
- * On failure it calls errx() and does not return. Use it only from
- * check_args(), before the daemon forks. Do not call it from the D-Bus loop.
+ * Parse a CLI argument as an int >= @min_value.
+ * - An empty string or trailing junk calls errx().
+ * - Call only from check_args(), before fork.
  *
  * @arg_value  raw argv string.
  * @out_value  parsed int. Untouched on failure.
- * @arg_name   name used in the error message.
+ * @arg_name   name used in the error.
  * @min_value  lowest accepted value, inclusive.
  */
 void
