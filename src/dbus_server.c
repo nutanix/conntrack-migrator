@@ -683,6 +683,30 @@ err:
 }
 
 /**
+ * Quit the dbus GMainLoop from its own GMainContext.
+ * - Invoked as an idle so the quit runs inside g_main_loop_run even if
+ *   it was requested after the loop pointer was published and before
+ *   run() was entered. Direct g_main_loop_quit() from another thread is
+ *   lost in that window because run() sets is_running = TRUE on entry.
+ * - Drops the extra ref taken by dbus_server_request_quit.
+ *
+ * Args:
+ *   @data GMainLoop to quit. Owns one reference.
+ *
+ * Returns:
+ *   G_SOURCE_REMOVE.
+ */
+static gboolean
+quit_loop_idle(gpointer data)
+{
+    GMainLoop *main_loop = data;
+
+    g_main_loop_quit(main_loop);
+    g_main_loop_unref(main_loop);
+    return G_SOURCE_REMOVE;
+}
+
+/**
  * Ask the dbus thread to leave its main loop.
  * - See dbus_server.h for the quit contract.
  *
@@ -692,6 +716,8 @@ err:
 void
 dbus_server_request_quit(struct dbus_targs *targs)
 {
+    GMainLoop *loop_copy = NULL;
+
     if (targs == NULL) {
         return;
     }
@@ -699,9 +725,14 @@ dbus_server_request_quit(struct dbus_targs *targs)
     pthread_mutex_lock(&targs->loop_mu);
     targs->should_quit = true;
     if (targs->loop != NULL) {
-        g_main_loop_quit(targs->loop);
+        loop_copy = g_main_loop_ref(targs->loop);
     }
     pthread_mutex_unlock(&targs->loop_mu);
+
+    if (loop_copy != NULL) {
+        g_main_context_invoke(g_main_loop_get_context(loop_copy),
+                              quit_loop_idle, loop_copy);
+    }
 }
 
 /**
@@ -741,10 +772,12 @@ dbus_server_init(void *data)
         }
     }
 
-    /* Publish the loop atomically with the should_quit check so any quit
-     * request that arrived while we were still booting is honoured before
-     * we ever enter g_main_loop_run. Mirroring to the file-static `loop`
-     * keeps complete_on_load / complete_on_clear working unchanged. */
+    /* Publish the loop atomically with the should_quit check so a quit
+     * that arrived before g_main_loop_new is honoured without entering
+     * run. A quit after this unlock is delivered as an idle on the
+     * loop's context (see dbus_server_request_quit). Mirroring to the
+     * file-static `loop` keeps complete_on_load / complete_on_clear
+     * working unchanged. */
     local_loop = g_main_loop_new(NULL, FALSE);
     pthread_mutex_lock(&targs->loop_mu);
     targs->loop = local_loop;

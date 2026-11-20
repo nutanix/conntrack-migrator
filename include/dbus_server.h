@@ -37,8 +37,9 @@ enum op_mode {
  * The loop_mu / loop / should_quit fields are used by
  * dbus_server_request_quit() to ask the dbus thread to exit its main
  * loop from another thread (typically dmain's error-cleanup path).
- * The mutex makes the quit signal race-free against
- * dbus_server_init() still being on its way to g_main_loop_new().
+ * should_quit is latched if the loop does not exist yet. Once the loop
+ * pointer is published, quit is delivered as an idle on the loop's
+ * GMainContext so g_main_loop_run cannot miss it.
  * Callers MUST pthread_mutex_init(&loop_mu, NULL) before pthread_create
  * and pthread_mutex_destroy() after pthread_join.
  */
@@ -65,7 +66,10 @@ dbus_server_init(void *);
 /**
  * Ask the dbus thread to leave its main loop.
  * - Safe from any thread.
- * - Safe before the loop exists: should_quit is latched and applied when the loop is published.
+ * - Safe before the loop exists: should_quit is latched and applied when
+ *   the loop is published.
+ * - Safe after the loop is published but before g_main_loop_run: an idle
+ *   on the loop's GMainContext quits from inside run.
  * - NULL is a no-op.
  *
  * @targs dbus thread args.

@@ -348,8 +348,8 @@ call_clear_for_test(GDBusProxy *proxy, GStrv data, bool expect_ok)
     }
 }
 
-pthread_t
-create_dbus_thread(const char *helper_id, int mode, bool *stop_flag)
+static struct dbus_targs *
+start_dbus_targs(const char *helper_id, int mode, bool *stop_flag)
 {
     struct dbus_targs *args = NULL;
     int ret;
@@ -368,9 +368,58 @@ create_dbus_thread(const char *helper_id, int mode, bool *stop_flag)
     ck_assert_msg(ret == 0, "Failed to create dbus thread. %s",
                   strerror(ret));
 
-    return args->tid;
+    return args;
+}
+
+pthread_t
+create_dbus_thread(const char *helper_id, int mode, bool *stop_flag)
+{
+    return start_dbus_targs(helper_id, mode, stop_flag)->tid;
 }
 //////////////////////////////////////////////////////////////////////////////
+
+START_TEST(test_request_quit_null)
+{
+    dbus_server_request_quit(NULL);
+}
+END_TEST
+
+START_TEST(test_request_quit_before_loop)
+{
+    struct dbus_targs args;
+    bool stop_flag = false;
+
+    memset(&args, 0, sizeof(args));
+    args.stop_flag = &stop_flag;
+    args.should_quit = false;
+    args.loop = NULL;
+    pthread_mutex_init(&args.loop_mu, NULL);
+
+    dbus_server_request_quit(&args);
+
+    ck_assert(args.should_quit == true);
+    ck_assert(args.loop == NULL);
+
+    pthread_mutex_destroy(&args.loop_mu);
+}
+END_TEST
+
+START_TEST(test_request_quit_stops_dbus_thread)
+{
+    bool stop_flag = false;
+    struct dbus_targs *args;
+
+    args = start_dbus_targs("helper_test_quit", SAVE_MODE, &stop_flag);
+    dbus_server_request_quit(args);
+    pthread_join(args->tid, NULL);
+
+    ck_assert(stop_flag == true);
+    ck_assert(args->should_quit == true);
+
+    pthread_mutex_destroy(&args->loop_mu);
+    g_free(args);
+}
+END_TEST
 
 START_TEST(test_src_save_pass_clear_fail)
 {
@@ -818,6 +867,9 @@ dbus_server_suite(void)
     tc_core = tcase_create("Core");
     tcase_set_timeout(tc_core, 120);
 
+    tcase_add_test(tc_core, test_request_quit_null);
+    tcase_add_test(tc_core, test_request_quit_before_loop);
+    tcase_add_test(tc_core, test_request_quit_stops_dbus_thread);
     tcase_add_test(tc_core, test_src_save_pass_clear_fail);
     tcase_add_test(tc_core, test_src_save_fail_clear_fail);
     tcase_add_test(tc_core, test_src_save_fail_clear_pass);
